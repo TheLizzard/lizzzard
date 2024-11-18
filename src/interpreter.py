@@ -161,22 +161,25 @@ class Interpreter:
 if __name__ == "__main__":
     TEST:str = """
 
-f = func(x):
-    g = func(): return x
+f = func(x) ->
+    g = func() -> return x
     return g
+c = func(f) ->
+    x = y = g = 0
+    return f()
 
 x = 5
 y = 2
-print(f(x+y)())
+print(c(f(x+y)))
 
 print("Wow! A string")
 print(brf"Wow! Another string")
 
-Y = func(f):
-    return func(x):
+Y = func(f) ->
+    return func(x) ->
         return f(f(f(f(f(f(f(f)))))))(x)
-fact_helper = func(rec):
-    return func(n):
+fact_helper = func(rec) ->
+    return func(n) ->
         return 1 if n == 0 else n*rec(n-1)
 fact = Y(fact_helper)
 print(fact(5))

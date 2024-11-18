@@ -33,14 +33,15 @@ FULL_TESTS = (
                 (r"5 ** 10", ("5", "**", "10")),
                 ("x\n\t#c", "x"),
                 ("x\n\t#c\ny", "x\ny"),
+                ("...", ["..."])
              )
 
 
 if __name__ == "__main__":
     for code, expected, expected_rest in TESTS:
         t:Tokeniser = Tokeniser(StringIO(code))
-        got:str = t.read_token()
-        rest:str = t.buffer.read(999)
+        got:str = t.read()
+        rest:str = t.under.read(999)
         assert got == expected, f"Test error in {code!r}, read {got!r} token"
         assert rest == expected_rest, f"Test error in {code!r}"
 
@@ -48,23 +49,23 @@ if __name__ == "__main__":
     for code, expected in FULL_TESTS:
         t:Tokeniser = Tokeniser(StringIO(code))
         for exp in expected:
-            assert t.read_token() == exp, f"Test error in {code!r}"
+            assert t.read() == exp, f"Test error in {code!r}"
         for i in range(10):
-            assert t.read_token() == "\n", "Should be empty"
+            assert t.read() == "\n", "Should be empty"
 
 
 """
 
 code:str = '''
-\t#x\nx
-'''
+a\n b\n c\n d
+'''[1:-1]
 
 t:Tokeniser = Tokeniser(StringIO(code))
 # print(repr("".join(map(repr, t.read(len(expected))))), repr(expected),
 #       sep="\n")
 for i in range(10):
-    tok = t.read_token()
-    print([tok, t.indentation, bool(t), t.token_buffer, t.buffer.peek(999)])
+    tok = t.read()
+    print([tok, t.indentation, bool(t), t.buffer, t.under.peek(999)])
 
 
 # """

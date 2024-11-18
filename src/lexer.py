@@ -1,32 +1,28 @@
 from __future__ import annotations
-from io import TextIOBase
-from enum import Enum
+from enum import Enum, auto
 
 
 DEBUG_THROW:bool = False
-DEBUG_READ:bool = False
 USING_COLON:bool = True
+DEBUG_READ:bool = False
+
 
 class TokenType(Enum):
-    IDENTIFIER:int = 1
-    STRING:int = 2
-    NUMBER:int = 3
-    OTHER:int = 4
-    EOF:int = 5
-    INDENT:int = 6
-    NEWLINE:int = 7
+    IDENTIFIER:int = auto()
+    STRING:int = auto()
+    OTHER:int = auto()
+    FLOAT:int = auto()
+    INT:int = auto()
 
 
-# "\t"   means start indentation of new block
-# "\n"   means new line
-# "\xff" means end the indentation of the block
-#          if 2 lines have same indentation this isn't used
 class Token:
     __slots__ = "token", "stamp", "type"
 
     def __init__(self, token:str, stamp:Stamp, type:TokenType) -> Token:
+        assert isinstance(type, TokenType), "TypeError"
         assert isinstance(stamp, Stamp), "TypeError"
-        assert isinstance(token, str|tuple), "TypeError"
+        assert isinstance(token, str), "TypeError"
+        assert len(token) > 0, "ValueError"
         self.type:TokenType = type
         self.stamp:Stamp = stamp
         self.token:str = token
@@ -48,11 +44,11 @@ class Token:
     def isidentifier(self) -> bool:
         return self.type is TokenType.IDENTIFIER
 
-    def isnumber(self) -> bool:
-        return self.type is TokenType.NUMBER
-
     def isint(self) -> bool:
-        return self.isnumber() and self.token.isnumeric()
+        return self.type is TokenType.INT
+
+    def isfloat(self) -> bool:
+        return self.type is TokenType.FLOAT
 
     def isstring(self) -> bool:
         return self.type is TokenType.STRING
@@ -71,20 +67,21 @@ class Stamp:
     __slots__ = "line", "char", "line_string"
 
     def __init__(self, line:int, char:int, line_string:str) -> Stamp:
+        assert isinstance(line_string, str), "TypeError"
+        assert isinstance(line, int), "TypeError"
+        assert isinstance(char, int), "TypeError"
         self.line_string:str = line_string
         self.char:str = char
         self.line:int = line
-
-        assert self.line_string
 
 
 class FinishedWithError(SyntaxError): ...
 
 
-class Buffer:
+class PreLexer:
     __slots__ = "under", "buffer", "ran_out", "line", "char", "line_string"
 
-    def __init__(self, buffer:TextIOBase) -> Buffer:
+    def __init__(self, buffer:TextIOBase) -> PreLexer:
         self.under:TextIOBase = buffer
         self.ran_out:bool = False
         self.line_string:str = ""
@@ -199,182 +196,200 @@ class _InverseBoolContext(BoolContext):
         return self.original
 
 
-IndentStack:type = list[str]
-
 class Tokeniser:
-    __slots__ = "buffer", "indentation", "token_buffer", "freeze_indentation"
+    __slots__ = "under", "indentation", "freeze_indentation", "ran_out", \
+                "buffer"
 
     def __init__(self, buffer:TextIOBase) -> Tokeniser:
         self.freeze_indentation:BoolContext = BoolContext()
-        self.buffer:Buffer = Buffer(buffer)
-        self.token_buffer:list[Token] = []
-        self.indentation:IndentStack = []
+        self.under:PreLexer = PreLexer(buffer)
+        self.indentation:Stack[str] = []
+        self.buffer:list[Token] = []
+        self.ran_out:bool = False
+        self.read_newline_into_buffer(first=True)
 
-        while self.buffer.peek(1) == "\n":
-            self.buffer.read(1)
-        if (self.buffer.peek(1) in list("\t ")) and USING_COLON:
-            # We shouldn't start the file with regex["\n*\t"]
-            #   so we leave it to the parser to kill us by
-            #   starting with \t
-            self.token_buffer.append(Token("\t", self.buffer.stamp(),
-                                           TokenType.INDENT))
+    def _throw(self, msg:str, stamp:Stamp=None) -> None:
+        stamp:Stamp = stamp or self.under.stamp()
+        assert isinstance(stamp, Stamp), "TypeError"
+        assert isinstance(msg, str), "TypeError"
+        self.under.throw(msg, stamp=stamp)
 
-    def throw(self, msg:str, stamp_or_stamp:Stamp=None) -> None:
-        if stamp_or_stamp is None:
-            stamp:Stamp = self.buffer.stamp()
-        elif isinstance(stamp_or_stamp, Token):
-            stamp:Stamp = stamp_or_stamp.stamp
-        elif isinstance(stamp_or_stamp, Stamp):
-            stamp:Stamp = stamp_or_stamp
-        else:
-            raise TypeError("stamp_or_stamp must be of type Stamp|Token|None")
-        self.buffer.throw(msg, stamp=stamp)
+    def throw(self, msg:str, token:Token=None) -> None:
+        assert isinstance(token, Token|None), "TypeError"
+        assert isinstance(msg, str), "TypeError"
+        stamp:Stamp = self.under.stamp() if (token is None) else token.stamp
+        self._throw(msg, stamp=stamp)
 
     def __bool__(self) -> bool:
-        if self.buffer:
-            return True
-        if len(self.token_buffer) == 0:
-            return False
-        if set(self.token_buffer) != {"\n"}:
-            return True
-        return False
+        return (not self.ran_out) or bool(self.buffer)
 
-    def _eat_characters(self, chars:tuple[str]|str, invert:bool=False) -> None:
-        if isinstance(chars, str):
-            chars:tuple[str] = tuple(chars)
-        while (self.buffer.peek(1) in chars) ^ invert:
-            if not self.buffer.read(1):
+    def remove_token_from_queue(self, token:Token) -> None:
+        for i, t in enumerate(self.buffer):
+            if t is token:
+                self.buffer.pop(i)
+                return
+        raise RuntimeError("InternalError caused by caller")
+
+    def _eat_characters(self, chars:str, invert:bool=False) -> None:
+        assert isinstance(invert, bool), "TypeError"
+        assert isinstance(chars, str), "TypeError"
+        while (self.under.peek(1) in chars) ^ invert:
+            if not self.under.read(1):
                 break
 
     def _eat_comment(self) -> None:
-        assert self.buffer.read(1) == "#", "No comment to eat?"
+        assert self.under.read(1) == "#", "No comment to eat?"
         self._eat_characters("\r\n", invert=True)
 
-    def peek(self, n:int=None) -> Token|list[Token]:
-        while len(self.token_buffer) < (n or 1):
-            self.token_buffer.append(self._read())
-        if n is None:
-            return self.token_buffer[0]
-        else:
-            return self.token_buffer[:n]
+    def prepend_token(self, token:str) -> None:
+        assert isinstance(token, str), "TypeError"
+        self.buffer.insert(0, Token("\n", self.under.stamp(), TokenType.OTHER))
 
-    def read(self, n:int|None=None) -> Token|list[Token]:
-        self.peek(n or 1)
-        if n is None:
-            if DEBUG_READ: print(f"[DEBUG]: Read {self.token_buffer[0]!r}")
-            return self.token_buffer.pop(0)
-        output, self.token_buffer = self.token_buffer[:n], self.token_buffer[n:]
+    def _get_first_or_newline(self, tokens:list[Token]) -> Token:
+        assert isinstance(tokens, list), "TypeError"
+        if len(tokens) == 0:
+            return Token("\n", self.under.stamp(), TokenType.OTHER)
+        return tokens[0]
+
+    def peek(self) -> Token:
+        return self._get_first_or_newline(self.peek_n(1))
+
+    def read(self) -> Token:
+        return self._get_first_or_newline(self.read_n(1))
+
+    def peek_n(self, n:int) -> list[Token]:
+        assert isinstance(n, int), "TypeError"
+        while (len(self.buffer) < n) and (not self.ran_out):
+            self.buffer.extend(self._read())
+            # for i in range(100):
+            #     tokens:list[Token] = self._read()
+            #     self.buffer.extend(tokens)
+            #     if tokens: break
+            # else:
+            #     raise RuntimeError("._read() didn't do anything 100 " \
+            #                        "times in a row")
+        return self.buffer[:n]
+
+    def read_n(self, n:int) -> list[Token]:
+        self.peek_n(n)
+        output, self.buffer = self.buffer[:n], self.buffer[n:]
         if DEBUG_READ: print(f"[DEBUG]: Read {output!r}")
         return output
-    read_token = read
 
-    def remove_token_from_queue(self, token:Token) -> None:
-        for i, t in enumerate(self.token_buffer):
-            if t is token:
-                self.token_buffer.pop(i)
-                return
-        self.throw("InternalError: remove_token_from_queue", token)
-
-    def _read(self) -> Token:
-        while True:
-            stamp:Stamp = self.buffer.stamp()
-            self._eat_characters(" \t")
-            stamp:Stamp = self.buffer.stamp()
-            token:str = self.buffer.peek(1)
-            if not token:
-                if self.indentation:
-                    self.add_dentations_eof()
-                return Token("\n", stamp, TokenType.EOF)
-            elif token.isidentifier():
-                ident:Token = self.read_identifier()
-                if self.buffer.peek(1) in ("'", '"'):
-                    return self.read_string(ident.token, type_stamp=stamp)
-                else:
-                    return ident
-            elif token in "0123456789":
-                return self.read_number()
-            elif token in "\"'":
-                return self.read_string("", type_stamp=stamp)
-            elif token == "#":
-                self._eat_comment()
-                continue
-            elif token in "$:[](){},.\t;":
-                return Token(self.buffer.read(1), stamp, TokenType.OTHER)
-            elif token in "+-*^%|<>=":
-                self.buffer.read(1)
-                if token == self.buffer.peek(1) == "*":
-                    token += self.buffer.read(1)
-                if token + self.buffer.peek(1) in ("--", "++", "->"):
-                    token += self.buffer.read(1)
-                elif self.buffer.peek(1) == "=":
-                    token += self.buffer.read(1)
-                return Token(token, stamp, TokenType.OTHER)
-            elif token in "/":
-                self.buffer.read(1)
-                if self.buffer.peek(1) == "/":
-                    token += self.buffer.read(1)
-                if self.buffer.peek(1) == "=":
-                    token += self.buffer.read(1)
-                return Token(token, stamp, TokenType.OTHER)
-            elif self.buffer.peek(2) == "!=":
-                return Token(self.buffer.read(2), stamp, TokenType.OTHER)
-            elif token == "\n":
-                if self.freeze_indentation:
-                    self.buffer.read(1)
-                else:
-                    self.read_newline_into_buffer()
-                continue
+    def _read(self) -> list[Token]:
+        stamp:Stamp = self.under.stamp()
+        if not self:
+            assert self.under.read(1) == "", "InternalError"
+            return [Token("\n", stamp, TokenType.OTHER)]
+        token:str = self.under.peek(1)
+        ret:Token = None
+        if token == "":
+            self.ran_out, n = True, len(self.indentation)
+            self.indentation.clear()
+            return [Token("\xff", stamp, TokenType.OTHER)]*n + \
+                   [Token("\n", stamp, TokenType.OTHER)]
+        elif token in "\t ":
+            assert self.under.read(1) == token, "Never fails"
+        elif token.isidentifier():
+            ident:Token = self.read_identifier()
+            if self.under.peek(1) in ("'", '"'):
+                ret:Token = self.read_string(ident.token, type_stamp=stamp)
             else:
-                self.throw(f"[LEXER] unknown {token=!r}", stamp)
-            raise NotImplementedError("Unreachable")
+                ret:Token = ident
+        elif token == "?":
+            q_mark:Stamp = self.under.stamp()
+            self.under.read(1)
+            if self.under.peek(1).isidentifier():
+                ident:Token = self.read_identifier()
+                ret:Token = Token("?"+ident.token, q_mark, TokenType.IDENTIFIER)
+            else:
+                ret:Token = Token("?", q_mark, TokenType.IDENTIFIER)
+        elif token in "0123456789":
+            ret:Token = self.read_number()
+        elif token in "\"'":
+            ret:Token = self.read_string("", type_stamp=stamp)
+        elif token == "#":
+            self._eat_comment()
+        elif token == ".":
+            if self.under.peek(2) == "..":
+                self.under.read(3)
+                ret:Token = Token("...", stamp, TokenType.OTHER)
+            else:
+                self.under.read(1)
+                ret:Token = Token(".", stamp, TokenType.OTHER)
+        elif token in "$:[](){},;":
+            self.under.read(1)
+            ret:Token = Token(token, stamp, TokenType.OTHER)
+        elif token in "+-*^%|<>=":
+            self.under.read(1)
+            if (token == "-") and (self.under.peek(1) == ">"):
+                token += self.under.read(1)
+            else:
+                if (token == "*") and (self.under.peek(1) == "*"): # **
+                    token += self.under.read(1)
+                if (token in "-+") and (self.under.peek(1) == token): # ++ --
+                    token += self.under.read(1)
+                elif self.under.peek(1) == "=":
+                    token += self.under.read(1)
+            ret:Token = Token(token, stamp, TokenType.OTHER)
+        elif token in "/":
+            self.under.read(1)
+            if self.under.peek(1) == "/": # //
+                token += self.under.read(1)
+            if self.under.peek(1) == "=": # /= //=
+                token += self.under.read(1)
+            ret:Token = Token(token, stamp, TokenType.OTHER)
+        elif self.under.peek(2) == "!=":
+            ret:Token = Token(self.under.read(2), stamp, TokenType.OTHER)
+        elif token == "\n":
+            if self.freeze_indentation:
+                self.under.read(1)
+            else:
+                return self.read_newline_into_buffer()
+        else:
+            self._throw(f"[LEXER] unknown {token=!r}", stamp)
+        return [] if (ret is None) else [ret]
 
-    def read_newline_into_buffer(self) -> None:
-        assert self.buffer.read(1) == "\n", "InternalError"
+    def read_newline_into_buffer(self, *, first:bool=False) -> list[Token]:
+        if not first:
+            assert self.under.read(1) == "\n", "InternalError"
         # Cleanup empty newlines
-        self.buffer.read_empty_lines(comment_start="#", ignore=" \t")
-        # Create newline token
-        stamp:Stamp = self.buffer.stamp()
-        newline_token:Token = Token("\n", stamp, TokenType.NEWLINE)
+        self.under.read_empty_lines("#", " \t")
+        # Create stamp and newline token
+        stamp:Stamp = self.under.stamp()
+        newline:Token = Token("\n", stamp, TokenType.OTHER)
         # not USING_COLON
         if not USING_COLON:
-            self.token_buffer.append(newline_token)
-            return
+            return [newline]
         # Dentation
         for i, indent in enumerate(self.indentation):
-            if self.buffer.peek(len(indent)) == indent:
-                self.buffer.read(len(indent))
-            elif self.buffer.peek(1) in ("\t", " "):
-                self.throw("[LEXER] IndentationError")
+            if self.under.peek(len(indent)) == indent:
+                self.under.read(len(indent))
+            elif self.under.peek(1) in ("\t", " "):
+                self._throw("[LEXER] IndentationError")
             else:
-                self.indentation, dentation = self.indentation[:i], \
-                                              self.indentation[i:]
-                token:Token = Token("\xff", stamp, TokenType.INDENT)
-                for _ in dentation:
-                    self.token_buffer.append(token)
-                self.token_buffer.append(newline_token)
-                break
+                token:Token = Token("\xff", stamp, TokenType.OTHER)
+                ret:list[Token] = [token] * (len(self.indentation)-i)
+                self.indentation:Stack[str] = self.indentation[:i]
+                return ret + [newline]
         else:
-            self.token_buffer.append(newline_token)
+            ret:list[Token] = [newline]
             # Indentation
             new_indent:str = ""
-            while self.buffer.peek(1) in ("\t", " "):
-                new_indent += self.buffer.read(1)
+            while bool(self.under) and (self.under.peek(1) in "\t "):
+                new_indent += self.under.read(1)
             if new_indent:
-                indent_token:Token = Token("\t", stamp, TokenType.INDENT)
+                indent_token:Token = Token("\t", stamp, TokenType.OTHER)
                 self.indentation.append(new_indent)
-                self.token_buffer.append(indent_token)
-
-    def add_dentations_eof(self) -> None:
-        # Add \xff for each indentation in self.indentations
-        self.token_buffer.extend(["\xff"]*len(self.indentation))
-        self.indentation.clear()
+                ret.append(indent_token)
+            return ret
 
     def read_identifier(self) -> Token:
         token:str = ""
-        stamp:Stamp = self.buffer.stamp()
+        stamp:Stamp = self.under.stamp()
         while True:
-            token += self.buffer.read(1)
-            ntoken:str = token + self.buffer.peek(1)
+            token += self.under.read(1)
+            ntoken:str = token + self.under.peek(1)
             if not ntoken.isidentifier():
                 break
             if token == ntoken:
@@ -382,98 +397,101 @@ class Tokeniser:
         return Token(token, stamp, TokenType.IDENTIFIER)
 
     def read_number(self) -> Token:
-        stamp:Stamp = self.buffer.stamp()
+        stamp:Stamp = self.under.stamp()
         output:str = self._parse_int()
-        if self.buffer.peek(1) in ("x", "b"):
-            _type:str = self.buffer.read(1)
+        is_float:bool = False
+        if self.under.peek(1) in ("x", "b"):
+            _type:str = self.under.read(1)
             allowed:str = "01" if _type == "b" else "0123456789abcdef"
             base:int = 2 if _type == "b" else 16
             if output != "0":
-                char:str = self.buffer.peek(1)
+                char:str = self.under.peek(1)
                 if char and (char in allowed):
-                    self.throw("[LEXER] Invalid binary integer literal", stamp)
+                    self._throw("[LEXER] Invalid binary integer literal", stamp)
                 if char != "\n":
-                    self.buffer.read(1)
-                    stamp:Stamp = self.buffer.stamp()
-                self.throw("[LEXER] Unexpected token after integer", stamp)
+                    self.under.read(1)
+                    stamp:Stamp = self.under.stamp()
+                self._throw("[LEXER] Unexpected token after integer", stamp)
             output:str = ""
             while True:
-                char:str = self.buffer.peek(1)
+                char:str = self.under.peek(1)
                 if (not char) or (char not in allowed):
                     break
-                output += self.buffer.read(1)
+                output += self.under.read(1)
             return str(int(output, base=base))
         else:
-            if self.buffer.peek(1) == ".":
-                self.buffer.read(1)
+            if self.under.peek(1) == ".":
+                self.under.read(1)
                 chunk:str = self._parse_int()
                 output += "." + chunk
-            if self.buffer.peek(1) == "e":
-                self.buffer.read(1)
+                is_float:bool = True
+            if self.under.peek(1) == "e":
+                self.under.read(1)
                 chunk:str = self._parse_int()
                 output += "e" + chunk
-        return Token(output, stamp, TokenType.NUMBER)
+        token_type:TokenType = TokenType.FLOAT if is_float else TokenType.INT
+        return Token(output, stamp, token_type)
 
     def _parse_int(self) -> str:
-        stamp:Stamp = self.buffer.stamp()
-        if self.buffer.peek(1) == "-":
-            neg:str = self.buffer.read(1)
+        stamp:Stamp = self.under.stamp()
+        if self.under.peek(1) == "-":
+            neg:str = self.under.read(1)
         else:
             neg:str = ""
         output:str = ""
         while True:
-            char:str = self.buffer.peek(1)
+            char:str = self.under.peek(1)
             if not char:
                 break
             if char not in "_0123456789":
                 break
             else:
                 output += char
-                self.buffer.read(1)
+                self.under.read(1)
         if (not output) or ("_" in output[0]+output[-1]):
-            self.throw("[LEXER] Couldn't parse number literal", stamp)
+            self._throw("[LEXER] Couldn't parse number literal", stamp)
         return neg+output.replace("_", "")
 
     def read_string(self, _type:str, type_stamp:Stamp) -> Token:
-        stamp:Stamp = self.buffer.stamp()
+        stamp:Stamp = self.under.stamp()
         if len(set(_type)) != len(_type):
-            self.throw(f"[LEXER] Invalid string prefix {_type!r}", type_stamp)
+            self._throw(f"[LEXER] Invalid string prefix {_type!r}", type_stamp)
         if _type.strip("rfb") != "":
-            self.throw(f"[LEXER] Invalid string prefix {_type!r}", type_stamp)
+            self._throw(f"[LEXER] Invalid string prefix {_type!r}", type_stamp)
         _type:int = 1*("r" in _type) + 2*("f" in _type) + 4*("b" in _type)
-        quote_type:str = self.buffer.read(1, "InteralError")
-        multiline:bool = (self.buffer.peek(2) == quote_type*2)
+        quote_type:str = self.under.read(1, "InteralError")
+        multiline:bool = (self.under.peek(2) == quote_type*2)
         if multiline:
-            self.buffer.read(2)
+            self.under.read(2)
         output:str = ""
         while True:
-            char:str = self.buffer.read(1, EOF_ERROR)
+            char:str = self.under.read(1, EOF_ERROR)
             if (char == "\n") and (not multiline):
-                self.throw(EOL_ERROR, stamp)
+                self._throw(EOL_ERROR, stamp)
             elif (char == "\\") and (_type & 1):
-                if self.buffer.peek(1) in ("\n", quote_type):
-                    char:str = self.buffer.read(1)
+                if self.under.peek(1) in ("\n", quote_type):
+                    char:str = self.under.read(1)
             elif char == "\\":
-                char:str = self.buffer.read(1, EOF_ERROR)
+                char:str = self.under.read(1, EOF_ERROR)
                 if char in STRING_ESCAPES:
                     char:str = STRING_ESCAPES[char]
                 elif char in "xuU":
-                    err_stamp:Stamp = self.buffer.stamp()
+                    err_stamp:Stamp = self.under.stamp()
                     if char == "x":
-                        data:str = self.buffer.read(2, EOF_ERROR)
+                        data:str = self.under.read(2, EOF_ERROR)
                     elif char == "u":
-                        data:str = self.buffer.read(4, EOF_ERROR)
+                        data:str = self.under.read(4, EOF_ERROR)
                     elif char == "U":
-                        data:str = self.buffer.read(8, EOF_ERROR)
+                        data:str = self.under.read(8, EOF_ERROR)
                     try:
                         char:str = chr(self._hex_to_int(data))
                     except ValueError:
-                        self.throw("[LEXER] Couldn't parse string literal " \
-                                   "escape sequence", err_stamp)
+                        self._throw("[LEXER] Couldn't parse string literal " \
+                                    "escape sequence", err_stamp)
             elif char == quote_type:
                 if multiline:
-                    if self.buffer.peek(2) == quote_type*2:
-                        self.buffer.read(2)
+                    if self.under.peek(2) == quote_type*2:
+                        self.under.read(2)
                         break
                 else:
                     break

@@ -74,10 +74,11 @@ class ByteCoder:
                  registers:list[bool]) -> int:
         res_reg:int = 0
         if isinstance(cmd, Assign):
-            name:str = cmd.identifier.identifier.token
-            assert isinstance(name, str), "TypeError"
             reg:int = self._convert(instructions, cmd.value, registers)
-            instructions.append(BStoreLoad(name, reg, True))
+            for target in cmd.targets:
+                assert isinstance(target, Var), "NotImplementedError"
+                name:str = target.identifier.token
+                instructions.append(BStoreLoad(name, reg, True))
             free_reg(registers, reg)
         elif isinstance(cmd, Literal):
             value:Token = cmd.literal
@@ -203,7 +204,8 @@ class ByteCoder:
             instructions.append(BRegMove(2, reg))
             instructions.append(label_end)
             instructions.append(BLiteral(res_reg, func_id, BLiteral.FUNC_T))
-        elif isinstance(cmd, Return):
+        elif isinstance(cmd, ReturnYield):
+            assert cmd.isreturn, "Haven't implemented yield yet"
             reg:int = self._convert(instructions, cmd.exp, registers)
             instructions.append(BRegMove(2, reg))
             free_reg(registers, reg)
@@ -225,17 +227,19 @@ class ByteCoder:
 
 if __name__ == "__main__":
     TEST = """
-f = func(x, y):
+f = func(x, y){
     return 0 if y == 0 else x + f(x, y-1)
+}
 
 x = 5
 y = 10
 z = f(x, y)
 
-while z > 8:
+while z > 8{
     z--
+}
 """
-    ast:Body = Parser(Tokeniser(StringIO(TEST))).read()
+    ast:Body = Parser(Tokeniser(StringIO(TEST)), colon=False).read()
     if ast is None:
         print("\x1b[96mNo ast due to previous error\x1b[0m")
     else:
