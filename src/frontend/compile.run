@@ -1,0 +1,15 @@
+#!/bin/bash
+set -e
+
+SCRIPT_DIR="$(dirname "$(realpath --no-symlinks "$0")")"
+cd "$SCRIPT_DIR"
+
+echo -e "\x1b[96m[DEBUG]: Compiling\x1b[0m"
+python2.7 rpython/bin/rpython targetlizzzard.py
+
+echo -e "\x1b[96m[DEBUG]: Cleaning up\x1b[0m"
+find . -name "__pycache__" -delete || true
+find . -name "*.pyc" -delete || true
+find . -name "*.pyo" -delete || true
+
+echo -e "\x1b[96m[DEBUG]: Done\x1b[0m"

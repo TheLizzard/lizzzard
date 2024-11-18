@@ -2,16 +2,11 @@ from __future__ import annotations
 from io import StringIO
 from sys import stderr
 
+from frontend.bcast import *
 from asts.ccast import *
-from asts.bcast import *
 from parser import *
 from lexer import *
 
-from python3.bytes_compat import bytes_join_empty
-
-FRAME_SIZE:int = 1 # number of bytes that hold the max frame size
-VERSION_SIZE:int = 4 # number of bytes to store the version
-VERSION:int = 1
 
 def get_fl() -> int:
     global _free_label
@@ -60,15 +55,8 @@ class ByteCoder:
             free_reg(registers, self._convert(instructions, cmd, registers))
         return instructions
 
-    def serialise_bytecode(self, bytecode:list[Bast]) -> bytes:
-        bast:bytes = bytes_join_empty(instruction.serialise() \
-                                      for instruction in bytecode)
-        return serialise_int(VERSION, VERSION_SIZE) + \
-               serialise_int(_max_frame_size, FRAME_SIZE) + \
-               bast
-
     def serialise(self) -> bytes:
-        return self.serialise_bytecode(self.to_bytecode())
+        return serialise(self.to_bytecode())
 
     def _convert(self, instructions:list[Bast], cmd:Cmd,
                  registers:list[bool]) -> int:
@@ -88,11 +76,11 @@ class ByteCoder:
                     res_reg:int = literal
                 else:
                     res_reg:int = get_free_reg(registers)
-                    instructions.append(BLiteral(res_reg, literal,
+                    instructions.append(BLiteral(res_reg, BLiteralInt(literal),
                                                  BLiteral.INT_T))
             elif value.isstring():
                 res_reg:int = get_free_reg(registers)
-                instructions.append(BLiteral(res_reg, value.token,
+                instructions.append(BLiteral(res_reg, BLiteralStr(value.token),
                                              BLiteral.STR_T))
             else:
                 raise NotImplementedError()
@@ -200,10 +188,11 @@ class ByteCoder:
             for subcmd in cmd.body:
                 self._convert(instructions, subcmd, frame_regs)
             reg:int = get_free_reg(frame_regs)
-            instructions.append(BLiteral(reg, 999, BLiteral.INT_T))
+            instructions.append(BLiteral(reg, BLiteralInt(999), BLiteral.INT_T))
             instructions.append(BRegMove(2, reg))
             instructions.append(label_end)
-            instructions.append(BLiteral(res_reg, func_id, BLiteral.FUNC_T))
+            instructions.append(BLiteral(res_reg, BLiteralInt(func_id),
+                                         BLiteral.FUNC_T))
         elif isinstance(cmd, ReturnYield):
             assert cmd.isreturn, "Haven't implemented yield yet"
             reg:int = self._convert(instructions, cmd.exp, registers)
@@ -213,33 +202,59 @@ class ByteCoder:
             raise NotImplementedError(f"Not implemented {cmd!r}")
         return res_reg
 
-    @staticmethod
-    def derialise(data:bytes) -> tuple[int,list[Bast]]:
-        version, data = derialise_int(data, VERSION_SIZE)
-        frame_size, data = derialise_int(data, FRAME_SIZE)
-        output:list[Bast] = []
-        while data:
-            ast_t_id, _ = derialise_ast_t_id(data)
-            bast, data = TABLE[ast_t_id].derialise(data)
-            output.append(bast)
-        return frame_size, output
+    def to_file(self, filepath:str) -> None:
+        assert isinstance(filepath, str), "TypeError"
+        with open(filepath, "wb") as file:
+            file.write(serialise(self.to_bytecode()))
+
+
+def serialise(bytecode:list[Bast]) -> bytes:
+    bast:bytes = b"".join(instruction.serialise() for instruction in bytecode)
+    return serialise_int(VERSION, VERSION_SIZE) + \
+           serialise_int(_max_frame_size, FRAME_SIZE) + \
+           bast
 
 
 if __name__ == "__main__":
     TEST = """
-f = func(x, y){
+f = func(x) ->
+    g = func() -> return x
+    return g
+c = func(f) ->
+    x = y = g = 0
+    return f()
+
+x = 5
+y = 2
+print(c(f(x+y)), "should be", 7)
+
+f = func(x, y) ->
     return 0 if y == 0 else x + f(x, y-1)
-}
 
 x = 5
 y = 10
 z = f(x, y)
+while z > 8 ->
+    z -= 1
+print(z, "should be", 8)
 
-while z > 8{
-    z--
-}
+Y = func(f) ->
+    return func(x) ->
+        return f(f(f(f(f(f(f(f)))))))(x)
+fact_helper = func(rec) ->
+    return func(n) ->
+        return 1 if n == 0 else n*rec(n-1)
+fact = Y(fact_helper)
+print(fact(5), "should be", 120)
 """
-    ast:Body = Parser(Tokeniser(StringIO(TEST)), colon=False).read()
+    TEST = """
+fib = func(x) ->
+    if x < 1 ->
+        return 1
+    return fib(x-2) + fib(x-1)
+print(fib(30))
+"""
+    ast:Body = Parser(Tokeniser(StringIO(TEST)), colon=True).read()
     if ast is None:
         print("\x1b[96mNo ast due to previous error\x1b[0m")
     else:
@@ -247,60 +262,14 @@ while z > 8{
         bytecode:list[Bast] = bytecoder.to_bytecode()
         print(bytecode_list_to_str(bytecode))
 
-        raw_bytecode:bytes = bytecoder.serialise_bytecode(bytecode)
-        print(raw_bytecode)
+        bytecoder.to_file("code-examples/example.clizz")
+        raw_bytecode:bytes = serialise(bytecode)
+        # print(raw_bytecode)
 
-        frame_size, decoded_bast = ByteCoder.derialise(raw_bytecode)
+        frame_size, decoded_bast = derialise(raw_bytecode)
         print(f"{frame_size=}")
         assert bytecode_list_to_str(bytecode) == \
                bytecode_list_to_str(decoded_bast), "AssertionError"
 
-
-"""
-        jumpif (1!=0) to func_0_end       goto func_0_end
-func_0_start:                           func_0_start:
-        Name[x] := 3
-        Name[y] := 4                      copy args [regs => env]
-        4 := Name[if]
-        6 := Name[==]
-        7 := Name[y]
-        5 := func-from-reg-6(7, 0)        register5  := (y == 0)
-        7 := Name[+]
-        8 := Name[x]
-        10 := Name[f]
-        11 := Name[x]
-        13 := Name[-]
-        14 := Name[y]
-        12 := func-from-reg-13(14, 1)     register12 := (y - 1)
-        9 := func-from-reg-10(11, 12)     register9  := f(x, register12)
-        6 := func-from-reg-7(8, 9)        register6  := (x + register9)
-        3 := func-from-reg-4(5, 0, 6)     return 0 if register5 else register6
-        2 := 3
-        3 := Literal[999]                 return 999
-        2 := 3
-
-func_0_end:                             func_0_end
-        3 := Literal[0]
-        Name[f] := 3                      f := function0
-        3 := Literal[5]
-        Name[x] := 3                      x := 5
-        3 := Literal[10]
-        Name[y] := 3                      y := 10
-        4 := Name[f]
-        5 := Name[x]
-        6 := Name[y]
-        3 := func-from-reg-4(5, 6)
-        Name[z] := 3                      z := f(x, y)
-
-while_1_start:                          while_1_start:
-        4 := Name[>]
-        5 := Name[z]
-        6 := Literal[8]
-        3 := func-from-reg-4(5, 6)        register3 := (z > 8)
-        jumpif (3==0) to while_1_end      jmpif (!register3) to while_1_end
-        4 := Name[--]
-        5 := Name[z]
-        3 := func-from-reg-4(5)           register3 := (z - 1)
-        jumpif (1!=0) to while_1_start    goto while_1_start
-while_1_end:                            while_1_end:
-""" # bug in --, reg not being stored after calc
+    fib = lambda x: 1 if x < 1 else fib(x-2)+fib(x-1)
+    print(fib(30))
