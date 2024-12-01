@@ -1,3 +1,4 @@
+from python3.rpython_compat import *
 from python3.star import *
 
 

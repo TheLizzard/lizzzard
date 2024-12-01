@@ -82,6 +82,8 @@ class ByteCoder:
                 res_reg:int = get_free_reg(registers)
                 instructions.append(BLiteral(res_reg, BLiteralStr(value.token),
                                              BLiteral.STR_T))
+            elif value in ("true", "false"):
+                res_reg:int = value == "true"
             else:
                 raise NotImplementedError()
         elif isinstance(cmd, Var):
@@ -176,8 +178,8 @@ class ByteCoder:
             func_id:int = get_fl()
             res_reg:int = get_free_reg(registers)
 
-            label_start:Bable = Bable("func_" + str(func_id)+"_start")
-            label_end:Bable = Bable("func_" + str(func_id)+"_end")
+            label_start:Bable = Bable(f"func_{func_id}_start")
+            label_end:Bable = Bable(f"func_{func_id}_end")
             instructions.append(BJump(label_end, 1, False))
             instructions.append(label_start)
             frame_regs:list[int] = new_reg_frame()
@@ -191,7 +193,7 @@ class ByteCoder:
             instructions.append(BLiteral(reg, BLiteralInt(999), BLiteral.INT_T))
             instructions.append(BRegMove(2, reg))
             instructions.append(label_end)
-            instructions.append(BLiteral(res_reg, BLiteralInt(func_id),
+            instructions.append(BLiteral(res_reg, BLiteralStr(label_start.id),
                                          BLiteral.FUNC_T))
         elif isinstance(cmd, ReturnYield):
             assert cmd.isreturn, "Haven't implemented yield yet"
@@ -254,6 +256,12 @@ fib = func(x) ->
     return fib(x-2) + fib(x-1)
 print(fib(30))
 """
+#     TEST = """
+# i = 0
+# while i < 10_000_000 ->
+#     i += 1
+# print(i)
+# """
     ast:Body = Parser(Tokeniser(StringIO(TEST)), colon=True).read()
     if ast is None:
         print("\x1b[96mNo ast due to previous error\x1b[0m")

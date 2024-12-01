@@ -1,8 +1,8 @@
 try:
-    from python3.int_compat import int_to_bytes, int_from_bytes
+    from python3.int_compat import *
     from python3.star import *
 except ImportError:
-    from .python3.int_compat import int_to_bytes, int_from_bytes
+    from .python3.int_compat import *
     from .python3.star import *
 
 def serialise_int(integer, size):
@@ -74,6 +74,7 @@ class Bast:
 
 
 class Bable(Bast):
+    _immutable_fields_ = ["id"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "id"
 
@@ -91,6 +92,7 @@ def Bable_derialise(data, Cls=Bable):
 
 
 class BCall(Bast):
+    _immutable_fields_ = ["regs"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "regs"
 
@@ -98,7 +100,8 @@ class BCall(Bast):
         assert isinstance(regs, list), "TypeError"
         for reg in regs:
             assert isinstance(reg, int), "TypeError"
-        self.regs = regs # 1st-reg := result, 2nd-reg := func
+            assert reg >= 0, "ValueError"
+        self.regs = regs # regs[0]:=result, regs[1]:=func
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
@@ -111,6 +114,7 @@ def BCall_derialise(data, Cls=BCall):
 
 
 class BStoreLoad(Bast):
+    _immutable_fields_ = ["name", "reg", "storing"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "name", "reg", "storing"
 
@@ -118,6 +122,7 @@ class BStoreLoad(Bast):
         assert isinstance(storing, bool), "TypeError"
         assert isinstance(name, str), "TypeError"
         assert isinstance(reg, int), "TypeError"
+        assert reg >= 0, "ValueError"
         self.storing = storing
         self.name = name
         self.reg = reg
@@ -140,11 +145,13 @@ def BStoreLoad_derialise(data, Cls=BStoreLoad):
 class BLiteralHolder:
     __slots__ = ()
 class BLiteralInt(BLiteralHolder):
+    _immutable_fields_ = ["int_value"]
     __slots__ = "int_value"
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
         self.int_value = value
 class BLiteralStr(BLiteralHolder):
+    _immutable_fields_ = ["str_value"]
     __slots__ = "str_value"
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
@@ -152,6 +159,7 @@ class BLiteralStr(BLiteralHolder):
 
 
 class BLiteral(Bast):
+    _immutable_fields_ = ["reg", "literal", "type"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "reg", "literal", "type"
     FUNC_T = 0
@@ -163,15 +171,16 @@ class BLiteral(Bast):
         assert isinstance(literal, BLiteralHolder), "TypeError"
         assert isinstance(type, int), "TypeError"
         assert isinstance(reg, int), "TypeError"
+        assert reg >= 0, "ValueError"
         self.literal = literal
         self.type = type
         self.reg = reg
 
     def serialise(self):
-        if self.type in (BLiteral.FUNC_T, BLiteral.PROC_T, BLiteral.INT_T):
+        if self.type == BLiteral.INT_T:
             assert isinstance(self.literal, BLiteralInt), "TypeError"
             literal = serialise_int(self.literal.int_value, INT_LITERAL_SIZE)
-        elif self.type == BLiteral.STR_T:
+        elif self.type in (BLiteral.STR_T, BLiteral.PROC_T, BLiteral.FUNC_T):
             assert isinstance(self.literal, BLiteralStr), "TypeError"
             literal = serialise_str(self.literal.str_value, STR_LITERAL_SIZE)
         else:
@@ -185,10 +194,10 @@ def BLiteral_derialise(data, Cls=BLiteral):
     data = assert_ast_t_id(data, Cls.AST_T_ID)
     reg, data = derialise_int(data, REG_SIZE)
     type, data = derialise_int(data, REG_SIZE)
-    if type in (BLiteral.FUNC_T, BLiteral.PROC_T, BLiteral.INT_T):
+    if type == BLiteral.INT_T:
         literal, data = derialise_int(data, INT_LITERAL_SIZE)
         literal = BLiteralInt(literal)
-    elif type == BLiteral.STR_T:
+    elif type in (BLiteral.STR_T, BLiteral.FUNC_T, BLiteral.PROC_T):
         literal, data = derialise_str(data, STR_LITERAL_SIZE)
         literal = BLiteralStr(literal)
     else:
@@ -198,6 +207,7 @@ def BLiteral_derialise(data, Cls=BLiteral):
 
 
 class BJump(Bast):
+    _immutable_fields_ = ["label", "negated", "condition_reg"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "label", "negated", "condition_reg"
 
@@ -205,6 +215,7 @@ class BJump(Bast):
         assert isinstance(condition_reg, int), "TypeError"
         assert isinstance(negated, bool), "TypeError"
         assert isinstance(label, Bable), "TypeError"
+        assert condition_reg >= 0, "ValueError"
         self.condition_reg = condition_reg
         self.negated = negated
         self.label = label
@@ -225,12 +236,15 @@ def BJump_derialise(data, Cls=BJump):
 
 
 class BRegMove(Bast):
+    _immutable_fields_ = ["reg1", "reg2"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "reg1", "reg2"
 
     def __init__(self, reg1, reg2):
         assert isinstance(reg1, int), "TypeError"
         assert isinstance(reg2, int), "TypeError"
+        assert reg1 >= 0, "ValueError"
+        assert reg2 >= 0, "ValueError"
         # reg1 := reg2
         # Writing to reg 2 means return from function
         self.reg1 = reg1
@@ -248,38 +262,51 @@ def BRegMove_derialise(data, Cls=BRegMove):
     return BRegMove(reg1, reg2), data
 
 
-def bytecode_list_to_str(bytecodes):
-    tab = "\t"
-    output = ""
-    for bt in bytecodes:
+def reg_to_str(reg):
+    return u"Reg[%s]" % int_to_str(reg)
+
+def bytecode_list_to_str(bytecodes, mini=False):
+    tab = u"" if mini else u"\t"
+    output = u""
+    for i, bt in enumerate(bytecodes):
         assert isinstance(bt, Bast), "TypeError"
+        if not mini:
+            output += int_to_str(i, zfill=2) + u" "
         if isinstance(bt, Bable):
-            output += bt.id + ":"
+            output += bt.id + u":"
         elif isinstance(bt, BCall):
-            output += tab + str(bt.regs[0]) + " := " + \
-                      "func-from-reg-" + str(bt.regs[1]) + \
-                      "(" + ", ".join(map(str,bt.regs[2:])) + ")"
+            output += tab + reg_to_str(bt.regs[0]) + u":=" + \
+                      reg_to_str(bt.regs[1]) + u"(" + \
+                      u",".join([reg_to_str(i) for i in bt.regs[2:]]) + \
+                      u")"
         elif isinstance(bt, BStoreLoad):
             if bt.storing:
-                output += tab + "Name[" + bt.name + "] := " + str(bt.reg)
+                output += tab + u"Name[" + bt.name + u"]:=" + \
+                          reg_to_str(int(bt.reg))
             else:
-                output += tab + str(bt.reg) + " := Name[" + bt.name + "]"
+                output += tab + reg_to_str(bt.reg) + u":=Name[" + bt.name + \
+                          u"]"
         elif isinstance(bt, BLiteral):
-            if isinstance(bt.literal, BLiteralInt):
-                literal = str(bt.literal.int_value)
-            elif isinstance(bt.literal, BLiteralStr):
-                literal = bt.literal.str_value
-            output += tab + str(bt.reg) + " := Literal[" + literal + "]"
+            bt_literal = bt.literal
+            if isinstance(bt_literal, BLiteralInt):
+                literal = int_to_str(bt_literal.int_value)
+            elif isinstance(bt_literal, BLiteralStr):
+                literal = bt_literal.str_value
+            else:
+                literal = u"unknown"
+            output += tab + reg_to_str(bt.reg) + u":=Literal[" + literal + \
+                      u"]"
         elif isinstance(bt, BJump):
-            output += tab + "jumpif (" + str(bt.condition_reg) + \
-                      ("=" if bt.negated else "!") + \
-                      "=0) to " + bt.label.id
+            output += tab + u"jumpif(" + reg_to_str(bt.condition_reg) + \
+                      (u"=" if bt.negated else u"!") + \
+                      u"=0)=>" + bt.label.id
         elif isinstance(bt, BRegMove):
-            output += tab + str(bt.reg1) + " := " + str(bt.reg2)
+            output += tab + reg_to_str(bt.reg1) + u":=" + reg_to_str(bt.reg2)
         else:
-            raise NotImplementedError("Haven't implemented "+repr(bt))
-        output += "\n"
-    return output[:-1]
+            output += u"UnknownInstruction"
+        if i != len(bytecodes)-1:
+            output += u"\n"
+    return output
 
 
 BAST_TYPES = [Bable, BCall, BStoreLoad, BLiteral, BJump, BRegMove]

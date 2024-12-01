@@ -168,3 +168,6 @@ src/frontend/rpython/*
 
 # The compiled binary
 src/frontend/lizzzard
+
+# Logs
+src/frontend/log/*

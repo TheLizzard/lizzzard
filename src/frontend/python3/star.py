@@ -10,3 +10,5 @@ except ImportError as error:
 
 if PYTHON == 2:
     bytes, str, bytes2 = str, unicode, bytes
+else:
+    bytes2 = str

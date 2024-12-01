@@ -1,7 +1,9 @@
+from .rpython_compat import *
 from .star import *
 
 
 if PYTHON == 2:
+    @elidable
     def int_to_bytes(integer, size):
         assert isinstance(integer, int), "TypeError"
         assert isinstance(size, int), "TypeError"
@@ -23,6 +25,7 @@ else:
 
 
 if PYTHON == 2:
+    @elidable
     def int_from_bytes(data):
         result = 0
         for byte in data:
@@ -36,10 +39,14 @@ else:
 
 
 if PYTHON == 2:
-    def int_to_str(data):
+    @elidable
+    def int_to_str(data, zfill=0):
         assert isinstance(data, int), "TypeError"
-        return bytes(data).decode("utf-8")
+        data = str(bytes2(data))
+        while len(data) < zfill:
+            data = u"0" + data
+        return data
 else:
-    def int_to_str(data):
+    def int_to_str(data, zfill=0):
         assert isinstance(data, int), "TypeError"
-        return str(data)
+        return str(data).zfill(zfill)
