@@ -1,7 +1,9 @@
 try:
+    from python3.rpython_compat import *
     from python3.int_compat import *
     from python3.star import *
 except ImportError:
+    from .python3.rpython_compat import *
     from .python3.int_compat import *
     from .python3.star import *
 
@@ -67,6 +69,8 @@ REG_SIZE = 1 # number of bytes needed to store a register id
 INT_LITERAL_SIZE = 8 # number of bytes needed to store a literal ints
 STR_LITERAL_SIZE = 4 # number of bytes to store a literal string size
 AST_T_ID_SIZE = 1 # Size of free_ast_id
+LABEL_SIZE = 1 # Bable label size
+NAME_SIZE = 1 # Variable name size
 
 
 class Bast:
@@ -80,14 +84,15 @@ class Bable(Bast):
 
     def __init__(self, id):
         assert isinstance(id, str), "TypeError"
-        self.id = id
+        self.id = const(const_str(id))
 
     def serialise(self):
-        return serialise_ast_t_id(self.AST_T_ID) + serialise_str(self.id, 1)
+        return serialise_ast_t_id(self.AST_T_ID) + \
+               serialise_str(self.id, LABEL_SIZE)
 
 def Bable_derialise(data, Cls=Bable):
     data = assert_ast_t_id(data, Cls.AST_T_ID)
-    id, data = derialise_str(data, 1)
+    id, data = derialise_str(data, LABEL_SIZE)
     return Bable(id), data
 
 
@@ -101,7 +106,7 @@ class BCall(Bast):
         for reg in regs:
             assert isinstance(reg, int), "TypeError"
             assert reg >= 0, "ValueError"
-        self.regs = regs # regs[0]:=result, regs[1]:=func
+        self.regs = [const(reg) for reg in regs] # regs[0]:=result, regs[1]:=func
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
@@ -123,19 +128,19 @@ class BStoreLoad(Bast):
         assert isinstance(name, str), "TypeError"
         assert isinstance(reg, int), "TypeError"
         assert reg >= 0, "ValueError"
-        self.storing = storing
-        self.name = name
-        self.reg = reg
+        self.storing = const(storing)
+        self.name = const(const_str(name))
+        self.reg = const(reg)
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
-               serialise_str(self.name, 2) + \
+               serialise_str(self.name, NAME_SIZE) + \
                serialise_int(self.reg, REG_SIZE) + \
                serialise_int(self.storing, 1)
 
 def BStoreLoad_derialise(data, Cls=BStoreLoad):
     data = assert_ast_t_id(data, Cls.AST_T_ID)
-    name, data = derialise_str(data, 2)
+    name, data = derialise_str(data, NAME_SIZE)
     reg, data = derialise_int(data, REG_SIZE)
     storing, data = derialise_int(data, 1)
     assert 0 <= storing <= 1, "ValueError"
@@ -149,13 +154,17 @@ class BLiteralInt(BLiteralHolder):
     __slots__ = "int_value"
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
-        self.int_value = value
+        self.int_value = const(value)
 class BLiteralStr(BLiteralHolder):
     _immutable_fields_ = ["str_value"]
     __slots__ = "str_value"
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
-        self.str_value = value
+        self.str_value = const(const_str(value))
+class BLiteralNone(BLiteralHolder):
+    _immutable_fields_ = []
+    __slots__ = ()
+    def __init__(self): pass
 
 
 class BLiteral(Bast):
@@ -164,17 +173,18 @@ class BLiteral(Bast):
     __slots__ = "reg", "literal", "type"
     FUNC_T = 0
     PROC_T = 1
-    INT_T = 2
-    STR_T = 3
+    NONE_T = 2
+    INT_T = 3
+    STR_T = 4
 
     def __init__(self, reg, literal, type):
         assert isinstance(literal, BLiteralHolder), "TypeError"
         assert isinstance(type, int), "TypeError"
         assert isinstance(reg, int), "TypeError"
         assert reg >= 0, "ValueError"
-        self.literal = literal
-        self.type = type
-        self.reg = reg
+        self.literal = const(literal)
+        self.type = const(type)
+        self.reg = const(reg)
 
     def serialise(self):
         if self.type == BLiteral.INT_T:
@@ -183,6 +193,8 @@ class BLiteral(Bast):
         elif self.type in (BLiteral.STR_T, BLiteral.PROC_T, BLiteral.FUNC_T):
             assert isinstance(self.literal, BLiteralStr), "TypeError"
             literal = serialise_str(self.literal.str_value, STR_LITERAL_SIZE)
+        elif self.type == BLiteral.NONE_T:
+            literal = b""
         else:
             raise ValueError("InvalidType")
         return serialise_ast_t_id(self.AST_T_ID) + \
@@ -195,18 +207,23 @@ def BLiteral_derialise(data, Cls=BLiteral):
     reg, data = derialise_int(data, REG_SIZE)
     type, data = derialise_int(data, REG_SIZE)
     if type == BLiteral.INT_T:
-        literal, data = derialise_int(data, INT_LITERAL_SIZE)
-        literal = BLiteralInt(literal)
+        raw_literal, data = derialise_int(data, INT_LITERAL_SIZE)
+        literal = BLiteralInt(raw_literal)
     elif type in (BLiteral.STR_T, BLiteral.FUNC_T, BLiteral.PROC_T):
-        literal, data = derialise_str(data, STR_LITERAL_SIZE)
-        literal = BLiteralStr(literal)
+        raw_literal, data = derialise_str(data, STR_LITERAL_SIZE)
+        literal = BLiteralStr(raw_literal)
+    elif type == BLiteral.NONE_T:
+        literal = BNONE
     else:
         raise ValueError("InvalidType")
     assert isinstance(literal, BLiteralHolder), "TypeError"
     return BLiteral(reg, literal, type), data
 
+BNONE = BLiteralNone()
+
 
 class BJump(Bast):
+    ### WARNING: BJump clears condition_reg no mater what!!!
     _immutable_fields_ = ["label", "negated", "condition_reg"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "label", "negated", "condition_reg"
@@ -214,25 +231,25 @@ class BJump(Bast):
     def __init__(self, label, condition_reg, negated):
         assert isinstance(condition_reg, int), "TypeError"
         assert isinstance(negated, bool), "TypeError"
-        assert isinstance(label, Bable), "TypeError"
+        assert isinstance(label, str), "TypeError"
         assert condition_reg >= 0, "ValueError"
-        self.condition_reg = condition_reg
-        self.negated = negated
-        self.label = label
+        self.condition_reg = const(condition_reg)
+        self.negated = const(negated)
+        self.label = const(const_str(label))
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
-               self.label.serialise() + \
+               serialise_str(self.label, LABEL_SIZE) + \
                serialise_int(self.negated, 1) + \
                serialise_int(self.condition_reg, REG_SIZE)
 
 def BJump_derialise(data, Cls=BJump):
     data = assert_ast_t_id(data, Cls.AST_T_ID)
-    bable, data = Bable_derialise(data)
+    label, data = derialise_str(data, LABEL_SIZE)
     negated, data = derialise_int(data, REG_SIZE)
     condition_reg, data = derialise_int(data, REG_SIZE)
     assert 0 <= negated <= 1, "ValueError"
-    return BJump(bable, condition_reg, bool(negated)), data
+    return BJump(label, condition_reg, bool(negated)), data
 
 
 class BRegMove(Bast):
@@ -246,9 +263,9 @@ class BRegMove(Bast):
         assert reg1 >= 0, "ValueError"
         assert reg2 >= 0, "ValueError"
         # reg1 := reg2
-        # Writing to reg 2 means return from function
-        self.reg1 = reg1
-        self.reg2 = reg2
+        # Writing to reg Literal[2] means return from function
+        self.reg1 = const(reg1)
+        self.reg2 = const(reg2)
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
@@ -292,6 +309,8 @@ def bytecode_list_to_str(bytecodes, mini=False):
                 literal = int_to_str(bt_literal.int_value)
             elif isinstance(bt_literal, BLiteralStr):
                 literal = bt_literal.str_value
+            elif isinstance(bt_literal, BLiteralNone):
+                literal = u"none"
             else:
                 literal = u"unknown"
             output += tab + reg_to_str(bt.reg) + u":=Literal[" + literal + \
@@ -299,7 +318,7 @@ def bytecode_list_to_str(bytecodes, mini=False):
         elif isinstance(bt, BJump):
             output += tab + u"jumpif(" + reg_to_str(bt.condition_reg) + \
                       (u"=" if bt.negated else u"!") + \
-                      u"=0)=>" + bt.label.id
+                      u"=0)=>" + bt.label
         elif isinstance(bt, BRegMove):
             output += tab + reg_to_str(bt.reg1) + u":=" + reg_to_str(bt.reg2)
         else:

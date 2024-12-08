@@ -28,12 +28,15 @@ def get_free_reg(regs:list[bool]) -> int:
     if _max_frame_size > (1<<(FRAME_SIZE*8)):
         raise RuntimeError("What are you doing that needs so many registers")
     return len(regs)-1
-def free_reg(regs:list[bool], reg:int) -> None:
+def free_reg(regs:list[bool], reg:int, instructions:list[Bast],
+             jump_reg:bool=False) -> None:
     assert isinstance(regs, list), "TypeError"
     assert isinstance(reg, int), "TypeError"
     assert 0 <= reg < len(regs), "ValueError"
     if reg > 1:
         regs[reg] = False
+        if not jump_reg:
+            instructions.append(BLiteral(reg, BNONE, BLiteral.NONE_T))
 
 def reset() -> None:
     global _max_frame_size, _free_label
@@ -52,7 +55,8 @@ class ByteCoder:
         instructions:list[Bast] = []
         registers:list[bool] = new_reg_frame()
         for cmd in self.ast:
-            free_reg(registers, self._convert(instructions, cmd, registers))
+            free_reg(registers, self._convert(instructions, cmd, registers),
+                     instructions)
         return instructions
 
     def serialise(self) -> bytes:
@@ -67,7 +71,7 @@ class ByteCoder:
                 assert isinstance(target, Var), "NotImplementedError"
                 name:str = target.identifier.token
                 instructions.append(BStoreLoad(name, reg, True))
-            free_reg(registers, reg)
+            free_reg(registers, reg, instructions)
         elif isinstance(cmd, Literal):
             value:Token = cmd.literal
             if value.isint():
@@ -99,19 +103,19 @@ class ByteCoder:
                 label_end:Bable = Bable("if_end_"+str(if_id))
                 # Condition
                 reg:int = self._convert(instructions, cmd.args[0], registers)
-                instructions.append(BJump(label_true, reg, False))
-                free_reg(registers, reg)
+                instructions.append(BJump(label_true.id, reg, False))
+                free_reg(registers, reg, instructions, jump_reg=True)
                 res_reg:int = get_free_reg(registers)
                 # If-false
                 tmp_reg:int = self._convert(instructions, cmd.args[2], registers)
                 instructions.append(BRegMove(res_reg, tmp_reg))
-                free_reg(registers, tmp_reg)
-                instructions.append(BJump(label_end, 1, False))
+                free_reg(registers, tmp_reg, instructions)
+                instructions.append(BJump(label_end.id, 1, False))
                 # If-true
                 instructions.append(label_true)
                 tmp_reg:int = self._convert(instructions, cmd.args[1], registers)
                 instructions.append(BRegMove(res_reg, tmp_reg))
-                free_reg(registers, tmp_reg)
+                free_reg(registers, tmp_reg, instructions)
                 instructions.append(label_end)
             else:
                 res_reg:int = get_free_reg(registers)
@@ -124,7 +128,7 @@ class ByteCoder:
                     regs.append(self._convert(instructions, arg, registers))
                 instructions.append(BCall(regs))
                 for reg in regs[1:]:
-                    free_reg(registers, reg)
+                    free_reg(registers, reg, instructions)
         elif isinstance(cmd, If):
             #   reg := condition
             #   jmpif reg if_true
@@ -137,16 +141,16 @@ class ByteCoder:
             label_true:Bable = Bable("if_true_"+str(if_id))
             label_end:Bable = Bable("if_end_"+str(if_id))
             reg:int = self._convert(instructions, cmd.exp, registers)
-            instructions.append(BJump(label_true, reg, False))
-            free_reg(registers, reg)
+            instructions.append(BJump(label_true.id, reg, False))
+            free_reg(registers, reg, instructions, jump_reg=True)
             for subcmd in cmd.false:
                 tmp_reg:int = self._convert(instructions, subcmd, registers)
-                free_reg(registers, tmp_reg)
-            instructions.append(BJump(label_end, 1, False))
+                free_reg(registers, tmp_reg, instructions)
+            instructions.append(BJump(label_end.id, 1, False))
             instructions.append(label_true)
             for subcmd in cmd.true:
                 tmp_reg:int = self._convert(instructions, subcmd, registers)
-                free_reg(registers, tmp_reg)
+                free_reg(registers, tmp_reg, instructions)
             instructions.append(label_end)
         elif isinstance(cmd, While):
             # while_start:
@@ -161,12 +165,12 @@ class ByteCoder:
             label_end:Bable = Bable("while_"+str(while_id)+"_end")
             instructions.append(label_start)
             reg:int = self._convert(instructions, cmd.exp, registers)
-            instructions.append(BJump(label_end, reg, True))
-            free_reg(registers, reg)
+            instructions.append(BJump(label_end.id, reg, True))
+            free_reg(registers, reg, instructions, jump_reg=True)
             for subcmd in cmd.true:
                 tmp_reg:int = self._convert(instructions, subcmd, registers)
-                free_reg(registers, tmp_reg)
-            instructions.append(BJump(label_start, 1, False))
+                free_reg(registers, tmp_reg, instructions)
+            instructions.append(BJump(label_start.id, 1, False))
             instructions.append(label_end)
         elif isinstance(cmd, Func):
             #   jmp label_end
@@ -180,7 +184,7 @@ class ByteCoder:
 
             label_start:Bable = Bable(f"func_{func_id}_start")
             label_end:Bable = Bable(f"func_{func_id}_end")
-            instructions.append(BJump(label_end, 1, False))
+            instructions.append(BJump(label_end.id, 1, False))
             instructions.append(label_start)
             frame_regs:list[int] = new_reg_frame()
             for i, arg in enumerate(cmd.args, start=3):
@@ -199,7 +203,7 @@ class ByteCoder:
             assert cmd.isreturn, "Haven't implemented yield yet"
             reg:int = self._convert(instructions, cmd.exp, registers)
             instructions.append(BRegMove(2, reg))
-            free_reg(registers, reg)
+            free_reg(registers, reg, instructions)
         else:
             raise NotImplementedError(f"Not implemented {cmd!r}")
         return res_reg
@@ -256,12 +260,12 @@ fib = func(x) ->
     return fib(x-2) + fib(x-1)
 print(fib(30))
 """
-#     TEST = """
-# i = 0
-# while i < 10_000_000 ->
-#     i += 1
-# print(i)
-# """
+    TEST = """
+i = 0
+while i < 10_000_000 ->
+    i += 1
+print(i)
+"""
     ast:Body = Parser(Tokeniser(StringIO(TEST)), colon=True).read()
     if ast is None:
         print("\x1b[96mNo ast due to previous error\x1b[0m")

@@ -1,7 +1,7 @@
 import sys
 
 from python3.rpython_compat import *
-# from python3.dict_compat import *
+from python3.dict_compat import *
 from python3.int_compat import *
 from python3.star import *
 from bcast import *
@@ -11,6 +11,7 @@ from debugger import debug, DEBUG_LEVEL
 
 class Value:
     __slots__ = ()
+    _immutable_fields_ = []
 
     def __repr__(self):
         return u"Value[???]"
@@ -22,7 +23,7 @@ class IntValue(Value):
 
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
-        self.value = const(value)
+        self.value = value
 
     def __repr__(self):
         return u"IntValue[" + int_to_str(self.value) + u"]"
@@ -34,7 +35,7 @@ class StrValue(Value):
 
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
-        self.value = const(const_str(value))
+        self.value = value
 
     def __repr__(self):
         return u"StrValue[" + self.value + u"]"
@@ -47,8 +48,8 @@ class FuncValue(Value):
     def __init__(self, tp, master):
         # assert isinstance(master, dict), "TypeError"
         assert isinstance(tp, str), "TypeError"
-        self.master = const(master)
-        self.tp = const(const_str(tp))
+        self.master = master
+        self.tp = tp
 
     def __repr__(self):
         return u"FuncValue[tp=" + tp + u"]"
@@ -56,10 +57,13 @@ class FuncValue(Value):
 
 class NoneValue(Value):
     __slots__ = ()
+    _immutable_fields_ = []
 
     def __repr__(self):
         return u"none"
-NONE = NoneValue()
+NONE = const(NoneValue())
+ZERO = const(IntValue(0))
+ONE = const(IntValue(1))
 
 
 def get_type(value):
@@ -81,15 +85,20 @@ BUILTIN_SIDES = ["print"]
 BUILTIN_OPS = list(map(str, BUILTIN_OPS))
 BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))
 
+@look_inside
+@elidable
 def new_regs(frame_size):
-    return [const(IntValue(0)), const(IntValue(1))] + [NONE]*frame_size
+    return [ZERO, ONE] + [NONE]*frame_size
 
-def repr_env(env):
-    env = env.copy()
-    for op in BUILTIN_OPS+BUILTIN_SIDES:
-        env.pop(op, None)
-    return repr(env).replace("'", '"').replace(": ", ":")
-
+@look_inside
+@elidable
+def reg_index(regs, idx):
+    if idx == 0:
+        return ZERO
+    elif idx == 1:
+        return ONE
+    else:
+        return regs[idx]
 
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
@@ -104,9 +113,7 @@ if USE_JIT:
     def get_location(pc, bytecode, _=None):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
-    greens = ["pc", "bytecode", "teleports"]
-    jitdriver = JitDriver(greens=greens, reds=["stack", "env", "regs"],
-                          get_printable_location=get_location)
+    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["stack","env","regs"], get_printable_location=get_location)
 
 
 class Interpreter:
@@ -120,119 +127,125 @@ class Interpreter:
         self.bytecode = bytecode
 
     def interpret(self):
-        teleports = {}
+        teleports = Dict()
         for i, bt in enumerate(self.bytecode):
             if isinstance(bt, Bable):
                 teleports[const(const_str(bt.id))] = const(IntValue(const(i)))
         for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
-            teleports[const(const_str(op))] = const(IntValue(len(self.bytecode)+i))
+            teleports[const(const_str(op))] = const(IntValue(const(len(self.bytecode)+i)))
         regs = new_regs(self.frame_size)
-        Interpreter._interpret(self.bytecode, teleports, regs)
+        _interpret(self.bytecode, teleports, regs)
 
-    @staticmethod
-    def _interpret(bytecode, teleports, regs):
-        bytecode = const([const(bt) for bt in bytecode])
-        teleports = const(teleports)
-        pc = 0 # current instruction being executed
-        stack = [] # list[tuple[Env,Regs,Pc,Reg]]
-        env = {}
-        for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
-            assert isinstance(op, str), "TypeError"
-            env[op] = FuncValue(op, env)
+def _interpret(bytecode, teleports, regs):
+    # bytecode = const([const(bt) for bt in bytecode])
+    bytecode = [const(bt) for bt in bytecode]
+    # teleports = const(teleports)
+    pc = 0 # current instruction being executed
+    stack = [] # list[tuple[Env,Regs,Pc,Reg]]
+    env = Dict()
+    for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
+        assert isinstance(op, str), "TypeError"
+        env[op] = FuncValue(op, env)
 
-        while pc < len(bytecode):
-            if USE_JIT:
-                jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
-            bt = const(bytecode[pc])
-            if (DEBUG_LEVEL >= 3) or DEBUG_JIT:
-                debug_str = bytecode_debug_str(pc, bt)
-            if DEBUG_LEVEL >= 3:
-                debug(debug_str, 3)
+    while pc < len(bytecode):
+        if USE_JIT:
+            jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
+        bt = bytecode[pc]
+        if DEBUG_LEVEL >= 3:
+            debug(bytecode_debug_str(pc, bt), 3)
+        pc += 1
 
-            if isinstance(bt, Bable):
-                if USE_JIT and DEBUG_JIT:
-                    jit_debug(str(debug_str))
-            elif isinstance(bt, BStoreLoad):
-                bt_name, bt_storing, bt_reg = const(const_str(bt.name)), const(bt.storing), const(bt.reg)
-                assert isinstance(bt_name, str), "TypeError"
-                if bt_storing:
-                    env[bt_name] = regs[bt_reg]
+        if isinstance(bt, Bable):
+            pass
+        elif isinstance(bt, BStoreLoad):
+            if bt.storing:
+                env[bt.name] = reg_index(regs, bt.reg)
+            else:
+                value = env.get(bt.name, None)
+                if value is None:
+                    raise_name_error(bt.name)
                 else:
-                    if bt_name not in env:
-                        raise_name_error(bt_name)
-                    else:
-                        regs[bt_reg] = env[bt_name]
-            elif isinstance(bt, BLiteral):
-                bt_literal, bt_type, bt_reg = const(bt.literal), const(bt.type), const(bt.reg)
-                if bt_type == BLiteral.INT_T:
-                    assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                    regs[bt_reg] = IntValue(const(bt_literal.int_value))
-                elif bt_type == BLiteral.FUNC_T:
-                    assert isinstance(bt_literal, BLiteralStr), "TypeError"
-                    regs[bt_reg] = FuncValue(const(bt_literal.str_value), env)
-                elif bt_type == BLiteral.STR_T:
-                    assert isinstance(bt_literal, BLiteralStr), "TypeError"
-                    regs[bt_reg] = StrValue(const(const_str(bt_literal.str_value)))
-                else:
-                    raise NotImplementedError()
-            elif isinstance(bt, BJump):
-                bt_condition_reg, bt_negated, bt_label_id = const(bt.condition_reg), const(bt.negated), const(bt.label.id)
-                value = regs[bt_condition_reg]
-                assert isinstance(value, IntValue), "TypeError"
-                condition = bool(value.value) ^ bt_negated
-                if condition:
-                    tp = teleports[bt_label_id]
-                    assert isinstance(tp, IntValue), "TypeError"
-                    old_pc, pc = pc, tp.value
-                    if USE_JIT and DEBUG_JIT:
-                        jit_debug(str(debug_str))
-                    # if USE_JIT and (pc < old_pc):
-                    #     jitdriver.can_enter_jit(stack=stack, regs=regs, pc=pc, env=env, bytecode=bytecode, teleports=teleports)
-            elif isinstance(bt, BRegMove):
-                bt_reg1, bt_reg2 = const(bt.reg1), const(bt.reg2)
-                if bt_reg1 == 2:
-                    ret_val = regs[bt_reg2]
-                    env, regs, pc, res_reg = stack.pop()
-                    regs[res_reg] = ret_val
-                else:
-                    regs[bt_reg1] = regs[bt_reg2]
-            elif isinstance(bt, BCall):
-                bt_regs = [const(reg) for reg in bt.regs]
-                func = const(regs[bt_regs[1]])
-                if not isinstance(func, FuncValue):
-                    raise_type_error(get_type(func) + u" is not callable")
-                assert isinstance(func, FuncValue), "TypeError"
-                func_tp, func_master = const(func.tp), const(func.master)
-                if func_tp not in teleports:
-                    raise_name_error(func_tp)
-                tp = teleports[func_tp] # Get teleport
+                    regs[bt.reg] = value
+                del value
+        elif isinstance(bt, BLiteral):
+            bt_literal = bt.literal
+            if bt.type == BLiteral.INT_T:
+                assert isinstance(bt_literal, BLiteralInt), "TypeError"
+                literal = IntValue(bt_literal.int_value)
+            elif bt.type == BLiteral.FUNC_T:
+                assert isinstance(bt_literal, BLiteralStr), "TypeError"
+                literal = FuncValue(bt_literal.str_value, env)
+            elif bt.type == BLiteral.STR_T:
+                assert isinstance(bt_literal, BLiteralStr), "TypeError"
+                literal = StrValue(bt_literal.str_value)
+            elif bt.type == BLiteral.NONE_T:
+                literal = NONE
+            else:
+                raise NotImplementedError()
+            regs[bt.reg] = literal
+            del literal, bt_literal
+        elif isinstance(bt, BJump):
+            # WARNING: Bjump always clears condition reg!!!
+            if bt.condition_reg > 1:
+                regs[bt.condition_reg], value = NONE, reg_index(regs, bt.condition_reg)
+            else:
+                value = reg_index(regs, bt.condition_reg)
+            assert isinstance(value, IntValue), "TypeError"
+            condition = bool(value.value) # ^ bt.negated
+            if (condition and (not bt.negated)) or ((not condition) and bt.negated):
+                tp = teleports.get(bt.label, None)
                 assert isinstance(tp, IntValue), "TypeError"
-                tp_value = const(tp.value)
-                if tp_value < len(bytecode):
-                    pc, old_pc = tp_value, pc
-                    stack.append((env,regs,old_pc,bt_regs[0]))
-                    old_regs, regs = regs, new_regs(len(regs))
-                    env = func_master.copy()
-                    for i in range(2, len(bt_regs)):
-                        regs[i+1] = old_regs[bt_regs[i]]
-                    if USE_JIT and (pc < old_pc):
-                        jitdriver.can_enter_jit(stack=stack, regs=regs, pc=pc, env=env, bytecode=bytecode, teleports=teleports)
-                else: # Built-ins
-                    op_idx = tp_value - len(bytecode)
-                    pure_op = op_idx < len(BUILTIN_OPS)
-                    if pure_op:
-                        op = BUILTIN_OPS[op_idx]
-                    else:
-                        op = BUILTIN_SIDES[op_idx-len(BUILTIN_OPS)]
-                    args = [regs[bt_regs[i]] for i in range(2,len(bt_regs))]
-                    if pure_op:
-                        regs[bt_regs[0]] = builtin_pure(op, args)
-                    else:
-                        regs[bt_regs[0]] = builtin_side(op, args)
-            pc += 1
-        if PYTHON == 2:
-            return
-        debug(int_to_str(pc,zfill=2) + u":\tFinal result: \x1b[0m" + repr_env(env), level=2)
+                old_pc, pc = pc, tp.value
+                if USE_JIT and (pc < old_pc):
+                    jitdriver.can_enter_jit(stack=stack, regs=regs, pc=pc, env=env, bytecode=bytecode, teleports=teleports)
+                del tp, old_pc
+            del value, condition
+        elif isinstance(bt, BRegMove):
+            if bt.reg1 == 2:
+                ret_val = reg_index(regs, bt.reg2)
+                env, regs, pc, res_reg = stack.pop()
+                regs[res_reg] = ret_val
+                del ret_val
+            else:
+                regs[bt.reg1] = reg_index(regs, bt.reg2)
+        elif isinstance(bt, BCall):
+            func = const(reg_index(regs, bt.regs[1]))
+            if not isinstance(func, FuncValue):
+                raise_type_error(get_type(func) + u" is not callable")
+            assert isinstance(func, FuncValue), "TypeError"
+            tp = teleports.get(func.tp, None)
+            if tp is None:
+                raise_name_error(func.tp)
+            assert isinstance(tp, IntValue), "TypeError"
+            tp_value = const(tp.value)
+            if tp_value < len(bytecode):
+                pc, old_pc = tp_value, pc
+                stack.append((env,regs,old_pc,bt.regs[0]))
+                old_regs, regs = regs, new_regs(len(regs))
+                env = func.master.copy()
+                for i in range(2, len(bt.regs)):
+                    regs[i+1] = old_regs[bt.regs[i]]
+                if USE_JIT and (pc < old_pc):
+                    jitdriver.can_enter_jit(stack=stack, regs=regs, pc=pc, env=env, bytecode=bytecode, teleports=teleports)
+                del old_regs, old_pc
+            else: # Built-ins
+                op_idx = tp_value - len(bytecode)
+                pure_op = op_idx < len(BUILTIN_OPS)
+                if pure_op:
+                    op = BUILTIN_OPS[op_idx]
+                else:
+                    op = BUILTIN_SIDES[op_idx-len(BUILTIN_OPS)]
+                args = [reg_index(regs, bt.regs[i]) for i in range(2,len(bt.regs))]
+                if pure_op:
+                    value = builtin_pure(op, args)
+                else:
+                    value = builtin_side(op, args)
+                regs[bt.regs[0]] = value
+                del args, pure_op, op_idx, op, value
+            del tp, tp_value, func
+        del bt
+    if PYTHON == 2:
+        return
 
 def builtin_pure(op, args):
     bin_int_op = bin_str_op = mul_str_op = False
@@ -434,6 +447,7 @@ if __name__ == "__main__":
 # https://pypy.org/posts/2011/04/tutorial-part-2-adding-jit-8121732841568309472.html
 # https://pypy.org/posts/2011/03/controlling-tracing-of-interpreter-with_15-3281215865169782921.html
 # https://web.archive.org/web/20170929153251/https://bitbucket.org/brownan/pypy-tutorial/src/tip/example4.py
+# https://doi.org/10.1016/j.entcs.2016.12.012
 
 """
 00       jumpif (1!=0) to func_0_end

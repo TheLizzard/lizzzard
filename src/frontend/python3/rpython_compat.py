@@ -15,7 +15,8 @@ class JitDriverDummy(object):
 if PYTHON == 2:
     try:
         from rpython.rlib.jit import JitDriver, elidable, promote, \
-                                     promote_unicode, jit_debug, hint
+                                     promote_unicode, jit_debug, hint, \
+                                     look_inside
         from rpython.rlib.objectmodel import specialize
         noargtype = specialize.argtype
         NO_RPYTHON = False
@@ -42,6 +43,7 @@ if NO_RPYTHON:
     promote = identity
     hint = identity_kw
     jit_debug = lambda s: None
+    look_inside = identity
 
 const_str = promote_unicode
 const = promote
