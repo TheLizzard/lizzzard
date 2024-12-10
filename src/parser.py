@@ -208,7 +208,7 @@ class Parser:
                                          "with a +ve integer literal", token)
             else:
                 n:int = 1
-            return BreakContinue(token, n, _type=="break")
+            return BreakContinue(_type, n, _type=="break")
         elif token == "with":
             exp = var = None
             self._assert_read("with")
@@ -511,10 +511,16 @@ class Parser:
         elif token == "[":
             with self.tokeniser.freeze_indentation:
                 self._assert_read("[")
-                exp:Expr = self._read_expr()
+                if self.tokeniser.peek() == "]":
+                    exp:Expr = Op(token, token.name_as("[]"))
+                else:
+                    exp:Expr = self._read_expr()
+                    if self._is_tuple(exp):
+                        array:list[Expr] = exp.args
+                    else:
+                        array:list[Expr] = [exp]
+                    exp:Expr = Op(token, token.name_as("[]"), *array)
                 self._assert_read("]", "Expected ] or comma")
-            array:list[Expr] = [exp] if not self._is_tuple(exp) else exp.args
-            exp:Expr = Op(token, token.name_as("[]"), *array)
         # dict/set
         elif token == "{":
             exp:Expr = self._read_expr__set_dict()

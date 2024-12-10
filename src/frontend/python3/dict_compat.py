@@ -1,5 +1,9 @@
-from python3.rpython_compat import *
-from python3.star import *
+try:
+    from rpython_compat import *
+    from star import *
+except ImportError:
+    from .rpython_compat import *
+    from .star import *
 
 
 _DICT_LENGTH = 256
@@ -57,6 +61,14 @@ class Dict:
 
     def __repr__(self):
         return "Dict"
+
+
+if __name__ == "__main__":
+    a = Dict()
+    a["5"] = 20
+    b = a.copy()
+    print(b.get("5", None))
+    print(b.get("4", None))
 
 
 """ # Tried a functional approach to get rpython to constant fold - didn't work

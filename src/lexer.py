@@ -74,6 +74,15 @@ class Stamp:
         self.char:str = char
         self.line:int = line
 
+    def throw(self, msg:str) -> None:
+        new_msg:str = msg + f" on line {self.line} character {self.char}\n"
+        new_msg += self.line_string
+        new_msg += " "*self.char + "^"
+        if DEBUG_THROW:
+            raise SyntaxError(new_msg)
+        else:
+            raise FinishedWithError(new_msg) from None
+
 
 class FinishedWithError(SyntaxError): ...
 
@@ -94,15 +103,8 @@ class PreLexer:
         return (not self.ran_out) or bool(self.buffer)
 
     def throw(self, msg:str, *, stamp:Stamp=None) -> None:
-        if stamp is None:
-            stamp:Stamp = self.stamp()
-        new_msg:str = msg + f" on line {stamp.line} character {stamp.char}\n"
-        new_msg += stamp.line_string
-        new_msg += " "*stamp.char + "^"
-        if DEBUG_THROW:
-            raise SyntaxError(new_msg)
-        else:
-            raise FinishedWithError(new_msg) from None
+        stamp:Stamp = stamp or self.stamp()
+        stamp.throw(msg)
 
     def read(self, size:int, error_msg:str=None) -> str:
         self.peek(size)

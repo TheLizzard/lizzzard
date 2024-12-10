@@ -1,4 +1,7 @@
-from .star import *
+try:
+    from star import *
+except ImportError:
+    from .star import *
 
 
 class JitDriverDummy(object):
@@ -47,8 +50,6 @@ if NO_RPYTHON:
 
 const_str = promote_unicode
 const = promote
-
-DEBUG_JIT = False # Raises MemoryError after compiled
 
 USE_JIT = False
 USE_JIT = True

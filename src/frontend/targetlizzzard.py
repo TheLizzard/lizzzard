@@ -1,3 +1,4 @@
+# Adapted from https://github.com/pycket/pycket
 from rpython.config.config import OptionDescription, BoolOption, IntOption, ArbitraryOption, FloatOption
 from rpython.config.translationoption import get_combined_translation_config
 from rpython.rlib import jit, objectmodel

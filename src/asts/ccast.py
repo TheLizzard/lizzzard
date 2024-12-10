@@ -265,6 +265,7 @@ class BreakContinue:
         assert isinstance(isbreak, bool), "TypeError"
         assert isinstance(ft, Token), "TypeError"
         assert isinstance(n, int), "TypeError"
+        assert n >= 1, "ValueError"
         self.isbreak:bool = isbreak
         self.ft:Token = ft
         self.n:int = n
@@ -350,6 +351,16 @@ def get_first_token(node:Cmd|Expr|MatchCase) -> Token:
                           BreakContinue|MatchCase|Match|NonLocal):
         return node.ft
     raise NotImplemented("TODO")
+
+def raise_error_token(msg:str, token:Token, error:Exception) -> None:
+    assert isinstance(error, Exception), "TypeError"
+    assert isinstance(token, Token), "TypeError"
+    assert isinstance(msg, str), "TypeError"
+    try:
+        token.stamp.throw(msg)
+    except SyntaxError as err:
+        error.msg:str = err.msg
+        raise error
 
 
 Macro:type = Func

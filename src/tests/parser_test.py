@@ -14,7 +14,9 @@ import lexer
 
 
 TEST_LITERAL_PRINT:str = """
+-1
 y = (0,)
+x = []
 x = [none]*6
 x[0] = 5
 x[1] = "hello world"
@@ -45,7 +47,9 @@ print(x)
 a, b = [5, 6]
 """
 RESULT_LITERAL_PRINT:str = """
+Literal[-1]
 Var[y] = Op(·,· Literal[0])
+Var[x] = Op([] )
 Var[x] = Op(* Op([] Literal[none]), Literal[6])
 Op(idx Var[x], Literal[none], Literal[0], Literal[none]) = Literal[5]
 Op(idx Var[x], Literal[none], Literal[1], Literal[none]) = Literal[0'hello world']

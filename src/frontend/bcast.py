@@ -74,7 +74,7 @@ NAME_SIZE = 1 # Variable name size
 
 
 class Bast:
-    __slots__ = ()
+    __slots__ = "err_idx"
 
 
 class Bable(Bast):
@@ -161,7 +161,7 @@ class BLiteralStr(BLiteralHolder):
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
         self.str_value = const(const_str(value))
-class BLiteralNone(BLiteralHolder):
+class BLiteralEmpty(BLiteralHolder):
     _immutable_fields_ = []
     __slots__ = ()
     def __init__(self): pass
@@ -174,8 +174,9 @@ class BLiteral(Bast):
     FUNC_T = 0
     PROC_T = 1
     NONE_T = 2
-    INT_T = 3
-    STR_T = 4
+    LIST_T = 3
+    INT_T = 4
+    STR_T = 5
 
     def __init__(self, reg, literal, type):
         assert isinstance(literal, BLiteralHolder), "TypeError"
@@ -193,7 +194,7 @@ class BLiteral(Bast):
         elif self.type in (BLiteral.STR_T, BLiteral.PROC_T, BLiteral.FUNC_T):
             assert isinstance(self.literal, BLiteralStr), "TypeError"
             literal = serialise_str(self.literal.str_value, STR_LITERAL_SIZE)
-        elif self.type == BLiteral.NONE_T:
+        elif self.type in (BLiteral.NONE_T, BLiteral.LIST_T):
             literal = b""
         else:
             raise ValueError("InvalidType")
@@ -212,14 +213,14 @@ def BLiteral_derialise(data, Cls=BLiteral):
     elif type in (BLiteral.STR_T, BLiteral.FUNC_T, BLiteral.PROC_T):
         raw_literal, data = derialise_str(data, STR_LITERAL_SIZE)
         literal = BLiteralStr(raw_literal)
-    elif type == BLiteral.NONE_T:
+    elif type in (BLiteral.NONE_T, BLiteral.LIST_T):
         literal = BNONE
     else:
         raise ValueError("InvalidType")
     assert isinstance(literal, BLiteralHolder), "TypeError"
     return BLiteral(reg, literal, type), data
 
-BNONE = BLiteralNone()
+BNONE = BLiteralEmpty()
 
 
 class BJump(Bast):
@@ -279,6 +280,28 @@ def BRegMove_derialise(data, Cls=BRegMove):
     return BRegMove(reg1, reg2), data
 
 
+class BLoadLink(Bast):
+    _immutable_fields_ = ["name", "link"]
+    AST_T_ID = free_ast_t_id()
+    __slots__ = "name", "link"
+
+    def __init__(self, name, link):
+        assert isinstance(name, str), "TypeError"
+        self.name = const(const_str(name))
+        self.link = link
+
+    def serialise(self):
+        return serialise_ast_t_id(self.AST_T_ID) + \
+               serialise_int(self.link, 1) + \
+               serialise_str(self.name, NAME_SIZE)
+
+def BLoadLink_derialise(data, Cls=BLoadLink):
+    data = assert_ast_t_id(data, Cls.AST_T_ID)
+    link, data = derialise_int(data, 1)
+    name, data = derialise_str(data, NAME_SIZE)
+    return BLoadLink(name, link), data
+
+
 def reg_to_str(reg):
     return u"Reg[%s]" % int_to_str(reg)
 
@@ -291,6 +314,9 @@ def bytecode_list_to_str(bytecodes, mini=False):
             output += int_to_str(i, zfill=2) + u" "
         if isinstance(bt, Bable):
             output += bt.id + u":"
+        elif isinstance(bt, BLoadLink):
+            output += tab + u"Name[" + bt.name + u"]:=link[" + \
+                      int_to_str(bt.link) + u"]"
         elif isinstance(bt, BCall):
             output += tab + reg_to_str(bt.regs[0]) + u":=" + \
                       reg_to_str(bt.regs[1]) + u"(" + \
@@ -309,8 +335,13 @@ def bytecode_list_to_str(bytecodes, mini=False):
                 literal = int_to_str(bt_literal.int_value)
             elif isinstance(bt_literal, BLiteralStr):
                 literal = bt_literal.str_value
-            elif isinstance(bt_literal, BLiteralNone):
-                literal = u"none"
+            elif isinstance(bt_literal, BLiteralEmpty):
+                if bt.type == BLiteral.NONE_T:
+                    literal = u"none"
+                elif bt.type == BLiteral.LIST_T:
+                    literal = u"[]"
+                else:
+                    literal = u"impossible"
             else:
                 literal = u"unknown"
             output += tab + reg_to_str(bt.reg) + u":=Literal[" + literal + \
@@ -328,10 +359,11 @@ def bytecode_list_to_str(bytecodes, mini=False):
     return output
 
 
-BAST_TYPES = [Bable, BCall, BStoreLoad, BLiteral, BJump, BRegMove]
+BAST_TYPES = [Bable, BCall, BStoreLoad, BLiteral, BJump, BRegMove, BLoadLink]
 DERIALISE = {Bable:Bable_derialise, BCall:BCall_derialise,
              BStoreLoad:BStoreLoad_derialise, BLiteral:BLiteral_derialise,
-             BJump:BJump_derialise, BRegMove:BRegMove_derialise}
+             BJump:BJump_derialise, BRegMove:BRegMove_derialise,
+             BLoadLink:BLoadLink_derialise}
 TABLE = {T.AST_T_ID:DERIALISE[T] for T in BAST_TYPES}
 
 

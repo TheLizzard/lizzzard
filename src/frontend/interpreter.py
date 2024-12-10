@@ -10,16 +10,16 @@ from debugger import debug, DEBUG_LEVEL
 
 
 class Value:
-    __slots__ = ()
     _immutable_fields_ = []
+    __slots__ = ()
 
     def __repr__(self):
         return u"Value[???]"
 
 
 class IntValue(Value):
-    __slots__ = "value"
     _immutable_fields_ = ["value"]
+    __slots__ = "value"
 
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
@@ -28,10 +28,12 @@ class IntValue(Value):
     def __repr__(self):
         return u"IntValue[" + int_to_str(self.value) + u"]"
 
+BoolValue = IntValue
+
 
 class StrValue(Value):
-    __slots__ = "value"
     _immutable_fields_ = ["value"]
+    __slots__ = "value"
 
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
@@ -42,8 +44,8 @@ class StrValue(Value):
 
 
 class FuncValue(Value):
-    __slots__ = "tp", "master"
     _immutable_fields_ = ["tp", "master"]
+    __slots__ = "tp", "master"
 
     def __init__(self, tp, master):
         # assert isinstance(master, dict), "TypeError"
@@ -52,7 +54,47 @@ class FuncValue(Value):
         self.tp = tp
 
     def __repr__(self):
-        return u"FuncValue[tp=" + tp + u"]"
+        return u"FuncValue[tp=" + self.tp + u"]"
+
+
+class LinkValue(Value):
+    _immutable_fields_ = ["link"]
+    __slots__ = "link"
+
+    def __init__(self, link):
+        assert isinstance(link, int), "TypeError"
+        assert link > 0, "ValueError"
+        self.link = link
+
+    def __repr__(self):
+        return u"link[" + int_to_str(self.link) + "]"
+
+
+class ListValue(Value):
+    _immutable_fields_ = ["array"]
+    __slots__ = "array"
+
+    def __init__(self):
+        self.array = []
+
+    @look_inside
+    def append(self, value):
+        assert isinstance(value, Value), "TypeError"
+        self.array.append(value)
+
+    @look_inside
+    @elidable
+    def index(self, idx):
+        assert isinstance(idx, int), "TypeError"
+        return self.array[idx]
+
+    @look_inside
+    @elidable
+    def len(self):
+        return len(self.array)
+
+    def __repr__(self):
+        return u"array[size=" + int_to_str(self.len()) + u"]"
 
 
 class NoneValue(Value):
@@ -61,34 +103,53 @@ class NoneValue(Value):
 
     def __repr__(self):
         return u"none"
+
+
 NONE = const(NoneValue())
 ZERO = const(IntValue(0))
 ONE = const(IntValue(1))
+FALSE = const(BoolValue(0))
+TRUE = const(BoolValue(1))
 
 
+@look_inside
+@elidable
 def get_type(value):
     if isinstance(value, IntValue):
         return u"int"
     if isinstance(value, StrValue):
         return u"str"
+    if isinstance(value, LinkValue):
+        return u"link"
     if value == NONE:
         return u"none"
     return u"unknown"
 
+@look_inside
+@elidable
+def force_bool(val):
+    assert isinstance(val, Value), "TypeError"
+    assert not isinstance(val, LinkValue), "InternalError"
+    if isinstance(val, IntValue):
+        return bool(val.value)
+    elif isinstance(val, StrValue):
+        return bool(val.value)
+    elif isinstance(val, ListValue):
+        return bool(val.len())
+    elif val == NONE:
+        return False
+    return True
 
-def reprr(value):
-    return value.__repr__()
 
-
-BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or"]
-BUILTIN_SIDES = ["print"]
+BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or", "len", "idx", "[]"]
+BUILTIN_SIDES = ["print", "append"]
 BUILTIN_OPS = list(map(str, BUILTIN_OPS))
 BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))
 
 @look_inside
 @elidable
 def new_regs(frame_size):
-    return [ZERO, ONE] + [NONE]*frame_size
+    return [ZERO, ONE] + [NONE]*(const(frame_size))
 
 @look_inside
 @elidable
@@ -136,12 +197,11 @@ class Interpreter:
         regs = new_regs(self.frame_size)
         _interpret(self.bytecode, teleports, regs)
 
+
 def _interpret(bytecode, teleports, regs):
-    # bytecode = const([const(bt) for bt in bytecode])
     bytecode = [const(bt) for bt in bytecode]
-    # teleports = const(teleports)
     pc = 0 # current instruction being executed
-    stack = [] # list[tuple[Env,Regs,Pc,Reg]]
+    stack = [] # list[tuple[Env,Regs,Pc,RetReg]]
     env = Dict()
     for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
         assert isinstance(op, str), "TypeError"
@@ -157,16 +217,29 @@ def _interpret(bytecode, teleports, regs):
 
         if isinstance(bt, Bable):
             pass
+        elif isinstance(bt, BLoadLink):
+            env[bt.name] = LinkValue(bt.link)
         elif isinstance(bt, BStoreLoad):
-            if bt.storing:
-                env[bt.name] = reg_index(regs, bt.reg)
+            # Get the correct scope
+            value = env.get(bt.name, None)
+            if isinstance(value, LinkValue):
+                var_env = env
+                for _ in range(value.link):
+                    var_env_holder = var_env.get(u"$prev_env", None)
+                    assert isinstance(var_env_holder, FuncValue), "InternalNonlocalError"
+                    var_env = var_env_holder.master
+                    del var_env_holder, _
             else:
-                value = env.get(bt.name, None)
+                var_env = env
+            # Store/load bt.name from scope
+            if bt.storing:
+                var_env[bt.name] = reg_index(regs, bt.reg)
+            else:
+                value = var_env.get(bt.name, None)
                 if value is None:
                     raise_name_error(bt.name)
-                else:
-                    regs[bt.reg] = value
-                del value
+                regs[bt.reg] = value
+            del value, var_env
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
             if bt.type == BLiteral.INT_T:
@@ -180,6 +253,8 @@ def _interpret(bytecode, teleports, regs):
                 literal = StrValue(bt_literal.str_value)
             elif bt.type == BLiteral.NONE_T:
                 literal = NONE
+            elif bt.type == BLiteral.LIST_T:
+                literal = ListValue()
             else:
                 raise NotImplementedError()
             regs[bt.reg] = literal
@@ -190,21 +265,26 @@ def _interpret(bytecode, teleports, regs):
                 regs[bt.condition_reg], value = NONE, reg_index(regs, bt.condition_reg)
             else:
                 value = reg_index(regs, bt.condition_reg)
-            assert isinstance(value, IntValue), "TypeError"
-            condition = bool(value.value) # ^ bt.negated
+            condition = force_bool(value)
+            # if condition != bt.negated: # RPython's JIT can't constant fold bt.negated in this form :/
             if (condition and (not bt.negated)) or ((not condition) and bt.negated):
                 tp = teleports.get(bt.label, None)
                 assert isinstance(tp, IntValue), "TypeError"
                 old_pc, pc = pc, tp.value
                 if USE_JIT and (pc < old_pc):
-                    jitdriver.can_enter_jit(stack=stack, regs=regs, pc=pc, env=env, bytecode=bytecode, teleports=teleports)
+                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
                 del tp, old_pc
-            del value, condition
+            del value
         elif isinstance(bt, BRegMove):
             if bt.reg1 == 2:
                 ret_val = reg_index(regs, bt.reg2)
+                if len(stack) == 0:
+                    if not isinstance(ret_val, IntValue):
+                        raise_type_error(u"exit value should be an int not " + get_type(ret_val))
+                    print(u"[EXIT]: " + int_to_str(ret_val.value))
+                    break
                 env, regs, pc, res_reg = stack.pop()
-                regs[res_reg] = ret_val
+                regs[const(res_reg)] = ret_val
                 del ret_val
             else:
                 regs[bt.reg1] = reg_index(regs, bt.reg2)
@@ -221,13 +301,16 @@ def _interpret(bytecode, teleports, regs):
             if tp_value < len(bytecode):
                 pc, old_pc = tp_value, pc
                 stack.append((env,regs,old_pc,bt.regs[0]))
-                old_regs, regs = regs, new_regs(len(regs))
-                env = func.master.copy()
+                old_regs, regs = regs, new_regs(len(regs)-2) # Don't forget to account for Reg[0] and Reg[1] from len(regs)
+                assert len(old_regs) == len(regs), "InternalError"
+                new_env = func.master.copy()
+                new_env[u"$prev_env"] = func
+                env = new_env
                 for i in range(2, len(bt.regs)):
                     regs[i+1] = old_regs[bt.regs[i]]
+                del old_regs, new_env
                 if USE_JIT and (pc < old_pc):
-                    jitdriver.can_enter_jit(stack=stack, regs=regs, pc=pc, env=env, bytecode=bytecode, teleports=teleports)
-                del old_regs, old_pc
+                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
             else: # Built-ins
                 op_idx = tp_value - len(bytecode)
                 pure_op = op_idx < len(BUILTIN_OPS)
@@ -237,176 +320,305 @@ def _interpret(bytecode, teleports, regs):
                     op = BUILTIN_SIDES[op_idx-len(BUILTIN_OPS)]
                 args = [reg_index(regs, bt.regs[i]) for i in range(2,len(bt.regs))]
                 if pure_op:
-                    value = builtin_pure(op, args)
+                    value = builtin_pure(op, args, op)
                 else:
                     value = builtin_side(op, args)
                 regs[bt.regs[0]] = value
                 del args, pure_op, op_idx, op, value
             del tp, tp_value, func
         del bt
-    if PYTHON == 2:
-        return
 
-def builtin_pure(op, args):
-    bin_int_op = bin_str_op = mul_str_op = False
+
+@look_inside
+def builtin_pure(op, args, op_print):
+    if op in (u"+", u"*", u"==", u"len", u"idx"):
+        if (len(args) > 0) and isinstance(args[0], ListValue):
+            return builtin_pure_list(op, args, op)
+        elif (len(args) == 2) and isinstance(args[1], ListValue):
+            return builtin_pure_list(op, args, op)
+    elif op == u"[]":
+        return builtin_pure_list(op, args, op)
+    return builtin_pure_nonlist(op, args, op)
+
+
+@look_inside
+def builtin_pure_list(op, args, op_print):
+    assert len(args) > 0, "InternalError"
     if op == u"+":
         if len(args) != 2:
-            raise_type_error(op + u" expected 2 arguments")
-        assert len(args) == 2, "Unreachable"
-        if isinstance(args[0], IntValue):
-            bin_int_op = True
-        elif isinstance(args[0], StrValue):
-            bin_str_op = True
-        else:
-            raise_type_error(get_type(args[0]) + u" doesn't support " + op)
-            assert False, "Unreachable"
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if not isinstance(arg0, ListValue):
+            raise_type_error(get_type(arg0) + u" doesn't support " + op_print + u" with " + get_type(arg1))
+        if not isinstance(arg1, ListValue):
+            raise_type_error(u"can't " + op_print + u" list with " + get_type(arg1))
+        new = ListValue()
+        new.array = arg0.array + arg1.array
+        return new
+
     elif op == u"*":
         if len(args) != 2:
-            raise_type_error(op + u" expected 2 arguments")
-        assert len(args) == 2, "Unreachable"
+            raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
-        if isinstance(arg0, IntValue) and isinstance(arg1, StrValue):
-            mul_str_op = True
-        elif isinstance(arg0, StrValue) and isinstance(arg1, IntValue):
-            mul_str_op = True
-        elif isinstance(arg0, IntValue) and isinstance(arg1, IntValue):
-            bin_int_op = True
-        else:
-            raise_type_error(get_type(arg0) + u" doesn't support " + op + u" with " + get_type(arg1))
-            assert False, "Unreachable"
-    elif op in (u"-", u"//", u"%"):
-        if len(args) != 2:
-            raise_type_error(op + u" expected 2 arguments")
-        assert len(args) == 2, "Unreachable"
-        bin_int_op = True
-    elif op in (u"==", u"!=", u">=", u"<=", u"<", u">", u"or", u"and"):
-        if len(args) != 2:
-            raise_type_error(op + u" expected 2 arguments")
-        assert len(args) == 2, "Unreachable"
-        if isinstance(args[0], IntValue):
-            bin_int_op = True
-        elif isinstance(args[0], StrValue):
-            bin_str_op = True
-        else:
-            raise_type_error(get_type(args[0]) + u" doesn't support " + op)
-            assert False, "Unreachable"
-    elif op in (u"not",):
-        pass
-    else:
-        raise NotImplementedError()
-
-    if bin_int_op:
-        assert len(args) == 2, "Unreachable"
-        arg0, arg1 = args[0], args[1]
-        if not isinstance(arg0, IntValue):
-            raise_type_error(get_type(arg0) + u" doesn't support " + op)
-        if not isinstance(arg1, IntValue):
-            raise_type_error(u"can't " + op + u" int with " + get_type(arg1))
-        assert isinstance(arg0, IntValue), "Unreachable"
-        assert isinstance(arg1, IntValue), "Unreachable"
-        if op == u"+":
-            res = arg0.value + arg1.value
-        elif op == u"-":
-            res = arg0.value - arg1.value
-        elif op == u"*":
-            res = arg0.value * arg1.value
-        elif op == u"//":
-            res = arg0.value // arg1.value
-        elif op == u"%":
-            res = arg0.value % arg1.value
-        elif op == u"==":
-            res = arg0.value == arg1.value
-        elif op == u"!=":
-            res = arg0.value != arg1.value
-        elif op == u"<":
-            res = arg0.value < arg1.value
-        elif op == u"<=":
-            res = arg0.value <= arg1.value
-        elif op == u">":
-            res = arg0.value > arg1.value
-        elif op == u">=":
-            res = arg0.value >= arg1.value
-        else:
-            raise NotImplementedError()
-        return IntValue(res)
-    elif bin_str_op:
-        assert len(args) == 2, "Unreachable"
-        arg0, arg1 = args[0], args[1]
-        if not isinstance(arg1, StrValue):
-            raise_type_error(u"can't " + op + u" str with " + get_type(arg1))
-        assert isinstance(arg0, StrValue), "Unreachable"
-        assert isinstance(arg1, StrValue), "Unreachable"
-        if op == u"+":
-            return StrValue(arg0.value + arg1.value)
-        elif op == u"==":
-            res = arg0.value == arg1.value
-        elif op == u"!=":
-            res = arg0.value != arg1.value
-        elif op == u"<":
-            res = arg0.value < arg1.value
-        elif op == u"<=":
-            res = arg0.value <= arg1.value
-        elif op == u">":
-            res = arg0.value > arg1.value
-        elif op == u">=":
-            res = arg0.value >= arg1.value
-        else:
-            raise NotImplementedError()
-        return IntValue(res)
-    elif op == u"not":
-        if len(args) != 1:
-            raise_type_error(op + u" expected 1 argument")
-        assert len(args) == 1, "Unreachable"
-        arg = args[0]
-        if isinstance(arg, StrValue):
-            res = len(arg.value) == 0
-        elif isinstance(arg, IntValue):
-            res = arg.value == 0
-        elif isinstance(arg, NoneValue):
-            res = 1
-        else:
-            res = 0
-        return IntValue(res)
-    elif mul_str_op:
-        assert len(args) == 2, "Unreachable"
-        arg0, arg1 = args[0], args[1]
-        if isinstance(arg0, StrValue):
+        if isinstance(arg0, ListValue):
             if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op + u" str " + u"with " + get_type(arg1))
-            assert isinstance(arg1, IntValue), "Unreachable"
-            res = arg0.value * arg1.value
+                raise_type_error(u"can't " + op_print + u" list with " + get_type(arg1))
+            new = ListValue()
+            for _ in range(arg1.value):
+                new.array += arg0.array
+            return new
         elif isinstance(arg0, IntValue):
-            if not isinstance(arg1, StrValue):
-                raise_type_error(u"can't " + op + u" int " + u"with " + get_type(arg1))
-            assert isinstance(arg1, StrValue), "Unreachable"
-            res = arg0.value * arg1.value
+            assert isinstance(arg1, ListValue), "InternalError"
+            new = ListValue()
+            for _ in range(arg0.value):
+                new.array += arg1.array
+            return new
         else:
-            raise NotImplementedError("Unreachable")
-        return StrValue(res)
-    raise_unreachable_error(u"Builtin " + op + u" not implemented")
-    assert False, "Unreachable"
+            raise_type_error(u"can't " + op_print + u" " + get_type(arg0) + u" with " + get_type(arg1))
 
+    elif op == u"==":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, ListValue):
+            if not isinstance(arg1, ListValue):
+                raise_type_error(u"can't " + op_print + u" list with " + get_type(arg1))
+            if arg0.len() != arg1.len():
+                return FALSE
+            for i in range(arg0.len()):
+                v = builtin_pure(u"==", [arg0.index(i),arg1.index(i)], op_print)
+                assert isinstance(v, BoolValue), "InternalError"
+                if not v.value:
+                    return FALSE
+            return TRUE
+        return FALSE
+
+    elif op == u"len":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects 1 argument")
+        arg = args[0]
+        if not isinstance(arg, ListValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg))
+        return IntValue(arg.len())
+
+    elif op == u"idx":
+        if len(args) != 4:
+            raise_type_error(op_print + u" expects 4 arguments (list, start, stop, step)")
+        arg0, arg1, arg2, arg3 = args
+        if not isinstance(arg0, ListValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
+        if not isinstance(arg1, NoneValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the 2nd arg")
+        if not isinstance(arg2, IntValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the 3rd arg")
+        if not isinstance(arg3, NoneValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the 4th arg")
+        return arg0.index(arg2.value)
+
+    elif op == u"[]":
+        new = ListValue()
+        new.array = args
+        return new
+
+    else:
+        raise_unreachable_error(u"builtin_pure_list " + op + u" not implemented (needed for " + op_print + u")")
+
+
+@look_inside
+def builtin_pure_nonlist(op, args, op_print):
+    if op == u"+":
+        if len(args) == 1:
+            arg = args[0]
+            if not isinstance(arg, IntValue):
+                raise_type_error(op_print + u" expects an int if used with 1 argument")
+            return arg
+        elif len(args) == 2:
+            arg0, arg1 = args
+            if isinstance(arg0, IntValue):
+                if not isinstance(arg1, IntValue):
+                    raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+                return IntValue(arg0.value + arg1.value)
+            elif isinstance(arg0, StrValue):
+                if not isinstance(arg1, StrValue):
+                    raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
+                return StrValue(arg0.value + arg1.value)
+            else:
+                raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+        else:
+            raise_type_error(op_print + u" expects 1 or 2 arguments")
+
+    elif op == u"-":
+        if len(args) == 1:
+            arg = args[0]
+            if not isinstance(arg, IntValue):
+                raise_type_error(op_print + u" expects an int if used with 1 argument")
+            return IntValue(-arg.value)
+        elif len(args) == 2:
+            arg0, arg1 = args
+            if not isinstance(arg0, IntValue):
+                raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+            if not isinstance(arg1, IntValue):
+                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+            return IntValue(arg0.value - arg1.value)
+
+    elif op == u"*":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value * arg1.value)
+            elif isinstance(arg1, StrValue):
+                return StrValue(arg0.value * arg1.value)
+            else:
+                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+        elif isinstance(arg0, StrValue):
+            if not isinstance(arg1, IntValue):
+                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
+            return StrValue(arg0.value * arg1.value)
+        else:
+            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+
+    elif op == u"%":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if not isinstance(arg0, IntValue):
+            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+        if not isinstance(arg1, IntValue):
+            raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+        return IntValue(arg0.value % arg1.value)
+
+    elif op == u"//":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if not isinstance(arg0, IntValue):
+            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+        if not isinstance(arg1, IntValue):
+            raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+        return IntValue(arg0.value // arg1.value)
+
+    elif op == u"==":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if not isinstance(arg1, IntValue):
+                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+            if arg0.value == arg1.value:
+                return TRUE
+        elif isinstance(arg0, StrValue):
+            if not isinstance(arg1, StrValue):
+                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
+            if arg0.value == arg1.value:
+                return TRUE
+        return FALSE
+
+    elif op == u"!=":
+        v = builtin_pure(u"==", args, op_print)
+        assert isinstance(v, BoolValue), "InternalError"
+        return FALSE if v.value else TRUE
+
+    elif op == u"<":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if not isinstance(arg1, IntValue):
+                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+            return BoolValue(arg0.value < arg1.value)
+        elif isinstance(arg0, StrValue):
+            if not isinstance(arg1, StrValue):
+                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
+            return BoolValue(arg0.value < arg1.value)
+        else:
+            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+
+    elif op == u">":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if not isinstance(arg1, IntValue):
+                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+            return BoolValue(arg0.value > arg1.value)
+        elif isinstance(arg0, StrValue):
+            if not isinstance(arg1, StrValue):
+                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
+            return BoolValue(arg0.value > arg1.value)
+        else:
+            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+
+    elif op == u"<=":
+        v = builtin_pure(u">", args, op_print)
+        assert isinstance(v, BoolValue), "InternalError"
+        return FALSE if v.value else TRUE
+
+    elif op == u">=":
+        v = builtin_pure(u"<", args, op_print)
+        assert isinstance(v, BoolValue), "InternalError"
+        return FALSE if v.value else TRUE
+
+    elif op == u"or":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        return arg0 if force_bool(arg0) else arg1
+
+    else:
+        raise_unreachable_error(u"builtin_pure " + op + u" not implemented (needed for " + op_print + u")")
+
+
+@look_inside
+@elidable
+def inner_repr(obj):
+    if isinstance(obj, IntValue):
+        return int_to_str(obj.value)
+    elif isinstance(obj, StrValue):
+        return obj.value[1:]
+    elif isinstance(obj, FuncValue):
+        return u"Func"
+    elif isinstance(obj, NoneValue):
+        return u"none"
+    elif isinstance(obj, ListValue):
+        string = u"["
+        for i, element in enumerate(obj.array):
+            string += inner_repr(element)
+            if i != obj.len()-1:
+                string += u", "
+        return string + u"]"
+    else:
+        return get_type(obj) + u" doesn't support repr"
+
+@look_inside
 def builtin_side(op, args):
     if op == u"print":
         string = u""
         for i, arg in enumerate(args):
-            if isinstance(arg, IntValue):
-                string += int_to_str(arg.value)
-            elif isinstance(arg, StrValue):
-                string += arg.value[1:]
-            elif isinstance(arg, NoneValue):
-                string += u"none"
-            else:
-                raise_type_error(get_type(arg) + u" doesn't support repr")
+            string += inner_repr(arg)
             if i != len(args)-1:
                 string += u" "
         print(u"[STDOUT]: " + string)
         return NONE
+    elif op == u"append":
+        if len(args) != 2:
+            raise_type_error(op + u" expected 2 arguments")
+        arg0, arg1 = args
+        if not isinstance(arg0, ListValue):
+            raise_type_error(op + u" expected a list as its 1st argument")
+        arg0.append(arg1)
+        return NONE
     raise_unreachable_error(u"Builtin " + op + u" not implemented")
     assert False, "Unreachable"
 
+
 def raise_name_error(name):
     print(u"\x1b[91mNameError: " + name + u" was not been defined\x1b[0m")
+    raise_error()
+
+def raise_index_error():
+    print(u"\x1b[91mIndexError: \x1b[0m")
     raise_error()
 
 def raise_type_error(msg):
@@ -441,97 +653,9 @@ if __name__ == "__main__":
     main("../code-examples/example.clizz")
 
 
-# Reftypes if needed
-# Write fib(x) in C/lizzzzard/python check performance
 # https://github.com/aheui/rpaheui/blob/main/LOG.md
 # https://pypy.org/posts/2011/04/tutorial-part-2-adding-jit-8121732841568309472.html
 # https://pypy.org/posts/2011/03/controlling-tracing-of-interpreter-with_15-3281215865169782921.html
 # https://web.archive.org/web/20170929153251/https://bitbucket.org/brownan/pypy-tutorial/src/tip/example4.py
 # https://doi.org/10.1016/j.entcs.2016.12.012
-
-"""
-00       jumpif (1!=0) to func_0_end
-01 func_0_start:
-02       Name[x] := 3
-03       4 := Name[<]
-04       5 := Name[x]
-05       3 := bcall<(5, 1)
-06       jumpif (3!=0) to if_true_1
-07       jumpif (1!=0) to if_end_1
-08 if_true_1:
-09       2 := 1
-10 if_end_1:
-11      4 := Name[+]
-12      6 := Name[fib]
-13      8 := Name[-]
-14      9 := Name[x]
-15      10 := Literal[2]
-16      7 := bcall-(9, 10)
-17      5 := func-from-reg-6(7)
-18      7 := Name[fib]
-19      9 := Name[-]
-20      10 := Name[x]
-21      8 := bcall-(10, 1)
-22      6 := func-from-reg-7(8)
-23      3 := bcall+(5, 6)
-24      2 := 3
-25      3 := Literal[999]
-26      2 := 3
-27 func_0_end:
-28      3 := Literal[0]
-29      Name[fib] := 3
-30      4 := Name[print]
-31      6 := Name[fib]
-32      7 := Literal[30]
-33      5 := func-from-reg-6(7)
-34      3 := func-from-reg-4(5)
-"""
-
-"""
-00      3 := Literal[500009]
-01      Name[n] := 3
-02      Name[is_prime] := 1
-03      3 := Literal[2]
-04      Name[i] := 3
-05 while_0_start:
-06      4 := Name[<]
-07      5 := Name[i]
-08      6 := Name[n]
-09      3 := func-from-reg-4(5, 6)
-10      jumpif (3==0) to while_0_end
-11      4 := Name[==]
-12      6 := Name[%]
-13      7 := Name[n]
-14      8 := Name[i]
-15      5 := func-from-reg-6(7, 8)
-16      3 := func-from-reg-4(5, 0)
-17      jumpif (3!=0) to if_true_1
-18      jumpif (1!=0) to if_end_1
-19 if_true_1:
-20      Name[is_prime] := 0
-21 if_end_1:
-22      jumpif (1!=0) to while_0_start
-23 while_0_end:
-24      4 := Name[print]
-25      5 := Name[is_prime]
-26      3 := func-from-reg-4(5)
-"""
-
-"""
-00      Name[i]:=Reg[0]
-01 while_0_start:
-02      Reg[4]:=Name[<]
-03      Reg[5]:=Name[i]
-04      Reg[6]:=Literal[10000000]
-05      Reg[3]:=Reg[4](Reg[5],Reg[6])
-06      jumpif(Reg[3]==0)=>while_0_end
-07      Reg[4]:=Name[+]
-08      Reg[5]:=Name[i]
-09      Reg[3]:=Reg[4](Reg[5],Reg[1])
-10      Name[i]:=Reg[3]
-11      jumpif(Reg[1]!=0)=>while_0_start
-12 while_0_end:
-13      Reg[4]:=Name[print]
-14      Reg[5]:=Name[i]
-15      Reg[3]:=Reg[4](Reg[5])
-"""
+# /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/rlib/jit.py
