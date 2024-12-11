@@ -381,3 +381,12 @@ def derialise(data):
         assert isinstance(bast, Bast), "Impossible"
         output.append(bast)
     return frame_size, output
+
+
+"""
+Special:
+    Calling `simple_idx=` with args=(array, idx, value)
+    Calling `.=` with args=(obj, ?, value)
+Not implemented:
+    Calling `idx=` with args=(array, start, stop, step, value)
+"""

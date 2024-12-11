@@ -9,6 +9,8 @@ from asts.ccast import *
 from parser import *
 from lexer import *
 
+CLEAR_REGS:bool = True # Should we clear regs after use so they are always none?
+
 
 class Labels:
     __slots__ = "_free_label"
@@ -45,19 +47,39 @@ class Regs:
         self._notify_max_reg(reg)
         return reg
 
-    def free_reg(self, reg:int, instructions:list[Bast],
-                 jump_reg:bool=False) -> None:
+    def free_reg(self, reg:int, instructions:list[Bast]) -> None:
         assert 0 <= reg < len(self._taken), "ValueError"
         if reg in (0, 1):
             return None
+        assert self._taken[reg], "reg not taken"
         self._taken[reg] = False
-        if not jump_reg:
+        self.clear_reg(reg, instructions)
+
+    def clear_reg(self, reg:int, instructions:list[Bast]) -> None:
+        if CLEAR_REGS:
             instructions.append(BLiteral(reg, BNONE, BLiteral.NONE_T))
 
     def _notify_max_reg(self, max_reg:int) -> None:
         self.max_reg:int = max(self.max_reg, max_reg)
         if self._parent is not None:
             self._parent._notify_max_reg(self.max_reg)
+
+
+class State:
+    __slots__ = "block", "blocks", "regs", "nonlocals", "loop_labels"
+
+    def __init__(self, *, blocks:list[list[Bast]], nonlocals:dict[str:int],
+                 block:list[Bast], loop_labels:list[tuple[str,str]], regs:Regs):
+        self.loop_labels:list[tuple[str,str]] = loop_labels
+        self.nonlocals:dict[str:int] = nonlocals
+        self.blocks:list[list[Bast]] = blocks
+        self.block:list[Bast] = block
+        self.regs:Regs = regs
+
+    def copy(self) -> State:
+        return State(blocks=self.blocks, loop_labels=self.loop_labels,
+                     block=self.block, nonlocals=self.nonlocals,
+                     regs=self.regs)
 
 
 class Block(list[Bast]):
@@ -81,18 +103,18 @@ class ByteCoder:
             return 3, []
 
     def _to_bytecode(self) -> tuple[int,list[list[Bast]]]:
-        instructions:Block = Block()
-        blocks:list[Block] = [instructions]
+        state:State = State(block=Block(), blocks=[], nonlocals={},
+                            loop_labels=[], regs=Regs())
+        state.blocks.append(state.block)
         self._labels.reset()
-        regs:Regs = Regs()
         for cmd in self.ast:
-            reg:int = self._convert(instructions, cmd, regs, blocks, {}, [])
-            regs.free_reg(reg, instructions)
-        tmp_reg:int = regs.get_free_reg()
-        instructions.append(BLiteral(tmp_reg, BLiteralInt(0), BLiteral.INT_T))
-        instructions.append(BRegMove(2, tmp_reg))
-        regs.free_reg(tmp_reg, instructions, jump_reg=True)
-        return regs.max_reg, blocks
+            reg:int = self._convert(cmd, state)
+            state.regs.free_reg(reg, state.block)
+        tmp_reg:int = state.regs.get_free_reg()
+        state.block.append(BLiteral(tmp_reg, BLiteralInt(0), BLiteral.INT_T))
+        state.block.append(BRegMove(2, tmp_reg))
+        state.regs.free_reg(tmp_reg, state.block)
+        return state.regs.max_reg, state.blocks
 
     def serialise(self) -> bytes:
         frame_size, bytecode_blocks = self.to_bytecode()
@@ -107,18 +129,36 @@ class ByteCoder:
                serialise_int(frame_size+1, FRAME_SIZE) + \
                bytes(bast)
 
-    def _convert(self, instructions:list[Bast], cmd:Cmd, regs:Regs,
-                 blocks:list[Block], nonlocals:dict[str:int],
-                 loop_labels:list[tuple[str,str]]) -> int:
+    def _convert(self, cmd:Cmd, state:State) -> int:
         res_reg:int = 0
         if isinstance(cmd, Assign):
-            reg:int = self._convert(instructions, cmd.value, regs, blocks,
-                                    nonlocals, loop_labels)
+            reg:int = self._convert(cmd.value, state)
             for target in cmd.targets:
-                assert isinstance(target, Var), "NotImplementedError"
-                name:str = target.identifier.token
-                instructions.append(BStoreLoad(name, reg, True))
-            regs.free_reg(reg, instructions)
+                if isinstance(target, Var):
+                    name:str = target.identifier.token
+                    state.block.append(BStoreLoad(name, reg, True))
+                elif isinstance(target, Op):
+                    # res_reg:int = state.regs.get_free_reg()
+                    if target.op == "simple_idx":
+                        args:list[int] = []
+                        for exp in target.args:
+                            args.append(self._convert(exp, state))
+                        tmp_reg:int = state.regs.get_free_reg()
+                        state.block.append(BStoreLoad("simple_idx=", tmp_reg, False))
+                        state.block.append(BCall([0,tmp_reg] + args + [reg]))
+                        state.regs.free_reg(tmp_reg, state.block)
+                        for tmp_reg in args:
+                            state.regs.free_reg(tmp_reg, state.block)
+                    elif target.op == ".":
+                        raise NotImplementedError("TODO")
+                    elif target.op == "·,·":
+                        raise NotImplementedError("TODO")
+                    else:
+                        raise NotImplementedError("Impossible")
+                else:
+                    raise NotImplementedError("Impossible")
+            state.regs.free_reg(reg, state.block)
+
         elif isinstance(cmd, Literal):
             value:Token = cmd.literal
             if value.isint():
@@ -126,26 +166,31 @@ class ByteCoder:
                 if literal in (0, 1):
                     res_reg:int = literal
                 else:
-                    res_reg:int = regs.get_free_reg()
-                    instructions.append(BLiteral(res_reg, BLiteralInt(literal),
-                                                 BLiteral.INT_T))
+                    res_reg:int = state.regs.get_free_reg()
+                    state.block.append(BLiteral(res_reg, BLiteralInt(literal),
+                                                BLiteral.INT_T))
             elif value.isstring():
-                res_reg:int = regs.get_free_reg()
-                instructions.append(BLiteral(res_reg, BLiteralStr(value.token),
-                                             BLiteral.STR_T))
+                res_reg:int = state.regs.get_free_reg()
+                state.block.append(BLiteral(res_reg, BLiteralStr(value.token),
+                                            BLiteral.STR_T))
             elif value in ("true", "false"):
                 res_reg:int = value == "true"
             elif value == "none":
-                res_reg:int = regs.get_free_reg()
-                instructions.append(BLiteral(res_reg, BLiteralEmpty(),
-                                             BLiteral.NONE_T))
+                res_reg:int = state.regs.get_free_reg()
+                if not CLEAR_REGS:
+                    state.block.append(BLiteral(res_reg, BLiteralEmpty(),
+                                                BLiteral.NONE_T))
+            elif value.isfloat():
+                raise NotImplementedError("TODO")
             else:
-                raise NotImplementedError()
+                raise NotImplementedError("Impossible")
+
         elif isinstance(cmd, Var):
             name:str = cmd.identifier.token
             assert isinstance(name, str), "TypeError"
-            res_reg:int = regs.get_free_reg()
-            instructions.append(BStoreLoad(name, res_reg, False))
+            res_reg:int = state.regs.get_free_reg()
+            state.block.append(BStoreLoad(name, res_reg, False))
+
         elif isinstance(cmd, Op):
             if cmd.op == "if":
                 # Set up
@@ -153,38 +198,36 @@ class ByteCoder:
                 label_true:Bable = Bable("if_true_"+str(if_id))
                 label_end:Bable = Bable("if_end_"+str(if_id))
                 # Condition
-                reg:int = self._convert(instructions, cmd.args[0], regs, blocks,
-                                        nonlocals, loop_labels)
-                instructions.append(BJump(label_true.id, reg, False))
-                regs.free_reg(reg, instructions, jump_reg=True)
-                res_reg:int = regs.get_free_reg()
+                reg:int = self._convert(cmd.args[0], state)
+                state.block.append(BJump(label_true.id, reg, False))
+                state.regs.free_reg(reg, state.block)
+                res_reg:int = state.regs.get_free_reg()
                 # If-false
-                tmp_reg:int = self._convert(instructions, cmd.args[2], regs,
-                                            blocks, nonlocals, loop_labels)
-                instructions.append(BRegMove(res_reg, tmp_reg))
-                regs.free_reg(tmp_reg, instructions)
-                instructions.append(BJump(label_end.id, 1, False))
+                tmp_reg:int = self._convert(cmd.args[2], state)
+                state.block.append(BRegMove(res_reg, tmp_reg))
+                state.regs.free_reg(tmp_reg, state.block)
+                state.block.append(BJump(label_end.id, 1, False))
                 # If-true
-                instructions.append(label_true)
-                tmp_reg:int = self._convert(instructions, cmd.args[1], regs,
-                                            blocks, nonlocals, loop_labels)
-                instructions.append(BRegMove(res_reg, tmp_reg))
-                regs.free_reg(tmp_reg, instructions)
-                instructions.append(label_end)
+                state.block.append(label_true)
+                state.regs.clear_reg(reg, state.block)
+                tmp_reg:int = self._convert(cmd.args[1], state)
+                state.block.append(BRegMove(res_reg, tmp_reg))
+                state.regs.free_reg(tmp_reg, state.block)
+                state.block.append(label_end)
             else:
-                res_reg:int = regs.get_free_reg()
+                res_reg:int = state.regs.get_free_reg()
                 used_regs:list[int] = [res_reg]
                 if cmd.op != "call":
-                    func:int = regs.get_free_reg()
-                    instructions.append(BStoreLoad(cmd.op.token, func, False))
+                    func:int = state.regs.get_free_reg()
+                    state.block.append(BStoreLoad(cmd.op.token, func, False))
                     used_regs.append(func)
                 for arg in cmd.args:
-                    reg:int = self._convert(instructions, arg, regs, blocks,
-                                            nonlocals, loop_labels)
+                    reg:int = self._convert(arg, state)
                     used_regs.append(reg)
-                instructions.append(BCall(used_regs))
+                state.block.append(BCall(used_regs))
                 for reg in used_regs[1:]:
-                    regs.free_reg(reg, instructions)
+                    state.regs.free_reg(reg, state.block)
+
         elif isinstance(cmd, If):
             #   reg := condition
             #   jmpif reg if_true
@@ -196,21 +239,20 @@ class ByteCoder:
             if_id:int = self._labels.get_fl()
             label_true:Bable = Bable("if_true_"+str(if_id))
             label_end:Bable = Bable("if_end_"+str(if_id))
-            reg:int = self._convert(instructions, cmd.exp, regs, blocks,
-                                    nonlocals, loop_labels)
-            instructions.append(BJump(label_true.id, reg, False))
-            regs.free_reg(reg, instructions, jump_reg=True)
+            reg:int = self._convert(cmd.exp, state)
+            state.block.append(BJump(label_true.id, reg, False))
+            state.regs.free_reg(reg, state.block)
             for subcmd in cmd.false:
-                tmp_reg:int = self._convert(instructions, subcmd, regs, blocks,
-                                            nonlocals, loop_labels)
-                regs.free_reg(tmp_reg, instructions)
-            instructions.append(BJump(label_end.id, 1, False))
-            instructions.append(label_true)
+                tmp_reg:int = self._convert(subcmd, state)
+                state.regs.free_reg(tmp_reg, state.block)
+            state.block.append(BJump(label_end.id, 1, False))
+            state.block.append(label_true)
+            state.regs.clear_reg(reg, state.block)
             for subcmd in cmd.true:
-                tmp_reg:int = self._convert(instructions, subcmd, regs, blocks,
-                                            nonlocals, loop_labels)
-                regs.free_reg(tmp_reg, instructions)
-            instructions.append(label_end)
+                tmp_reg:int = self._convert(subcmd, state)
+                state.regs.free_reg(tmp_reg, state.block)
+            state.block.append(label_end)
+
         elif isinstance(cmd, While):
             # while_start:
             #   reg := <condition>
@@ -222,19 +264,19 @@ class ByteCoder:
             while_id:int = self._labels.get_fl()
             label_start:Bable = Bable("while_"+str(while_id)+"_start")
             label_end:Bable = Bable("while_"+str(while_id)+"_end")
-            instructions.append(label_start)
-            reg:int = self._convert(instructions, cmd.exp, regs, blocks,
-                                    nonlocals, loop_labels)
-            instructions.append(BJump(label_end.id, reg, True))
-            regs.free_reg(reg, instructions, jump_reg=True)
-            loop_labels.append((label_start.id, label_end.id))
+            state.block.append(label_start)
+            reg:int = self._convert(cmd.exp, state)
+            state.block.append(BJump(label_end.id, reg, True))
+            state.regs.free_reg(reg, state.block)
+            state.loop_labels.append((label_start.id, label_end.id))
             for subcmd in cmd.true:
-                tmp_reg:int = self._convert(instructions, subcmd, regs, blocks,
-                                            nonlocals, loop_labels)
-                regs.free_reg(tmp_reg, instructions)
-            loop_labels.pop()
-            instructions.append(BJump(label_start.id, 1, False))
-            instructions.append(label_end)
+                tmp_reg:int = self._convert(subcmd, state)
+                state.regs.free_reg(tmp_reg, state.block)
+            state.loop_labels.pop()
+            state.block.append(BJump(label_start.id, 1, False))
+            state.block.append(label_end)
+            state.regs.clear_reg(reg, state.block)
+
         elif isinstance(cmd, Func):
             # <INSTRUCTIONS>:
             #   res_reg := func_label
@@ -243,53 +285,63 @@ class ByteCoder:
             #   <copy args>
             #   <function-body>
             func_id:int = self._labels.get_fl()
-            res_reg:int = regs.get_free_reg()
+            res_reg:int = state.regs.get_free_reg()
 
             label_start:Bable = Bable(f"func_{func_id}_start")
             label_end:Bable = Bable(f"func_{func_id}_end")
-            block:Block = Block()
-            blocks.append(block)
-            block.append(label_start)
-            frame_regs:Regs = Regs(regs)
+            nstate:State = state.copy()
+            nstate.nonlocals = {name:link+1
+                                for name,link in state.nonlocals.items()}
+            nstate.regs = Regs(state.regs)
+            nstate.loop_labels = []
+            nstate.block = Block()
+            nstate.block.append(label_start)
+            nstate.blocks.append(nstate.block)
             for i, arg in enumerate(cmd.args, start=3):
                 name:str = arg.identifier.token
                 assert isinstance(name, str), "TypeError"
-                block.append(BStoreLoad(name, i, True))
-            subnonlocals = {name:link+1 for name,link in nonlocals.items()}
+                nstate.block.append(BStoreLoad(name, i, True))
             for subcmd in cmd.body:
-                tmp_reg:int = self._convert(block, subcmd, frame_regs, blocks,
-                                            subnonlocals, [])
-                frame_regs.free_reg(tmp_reg, block)
-            reg:int = frame_regs.get_free_reg()
-            block.append(BLiteral(reg, BLiteralEmpty(), BLiteral.NONE_T))
-            block.append(BRegMove(2, reg))
-            instructions.append(BLiteral(res_reg, BLiteralStr(label_start.id),
-                                         BLiteral.FUNC_T))
+                tmp_reg:int = self._convert(subcmd, nstate)
+                nstate.regs.free_reg(tmp_reg, nstate.block)
+            reg:int = nstate.regs.get_free_reg()
+            if not CLEAR_REGS:
+                nstate.block.append(BLiteral(reg, BLiteralEmpty(),
+                                             BLiteral.NONE_T))
+            nstate.block.append(BRegMove(2, reg))
+            state.block.append(BLiteral(res_reg, BLiteralStr(label_start.id),
+                                        BLiteral.FUNC_T))
+
         elif isinstance(cmd, NonLocal):
             for identifier in cmd.identifiers:
-                if identifier not in nonlocals:
-                    nonlocals[identifier] = 1
-                link:int = nonlocals[identifier]
-                instructions.append(BLoadLink(identifier.token, link))
+                if identifier not in state.nonlocals:
+                    state.nonlocals[identifier] = 1
+                link:int = state.nonlocals[identifier]
+                state.block.append(BLoadLink(identifier.token, link))
+
         elif isinstance(cmd, ReturnYield):
-            assert cmd.isreturn, "Haven't implemented yield yet"
-            reg:int = self._convert(instructions, cmd.exp, regs, blocks,
-                                    nonlocals, loop_labels)
-            instructions.append(BRegMove(2, reg))
-            regs.free_reg(reg, instructions)
+            if cmd.isreturn:
+                reg:int = self._convert(cmd.exp, state)
+                state.block.append(BRegMove(2, reg))
+                state.regs.free_reg(reg, state.block)
+            else:
+                raise NotImplementedError("TODO")
+
         elif isinstance(cmd, BreakContinue):
-            if cmd.n > len(loop_labels):
+            if cmd.n > len(state.loop_labels):
                 action:str = "Break" if cmd.isbreak else "Continue"
-                if len(loop_labels) == 0:
+                if len(state.loop_labels) == 0:
                     msg:str = "No loops to " + action.lower()
                 else:
                     msg:str = action + " number too high"
                 raise_error_token(msg, cmd.ft, SemanticError())
-            start_label, end_label = loop_labels[-cmd.n]
+            start_label, end_label = state.loop_labels[-cmd.n]
             label:str = end_label if cmd.isbreak else start_label
-            instructions.append(BJump(label, 1, False))
+            state.block.append(BJump(label, 1, False))
+
         else:
             raise NotImplementedError(f"Not implemented {cmd!r}")
+
         return res_reg
 
     def to_file(self, filepath:str) -> None:
@@ -319,13 +371,18 @@ f = func(x, y){
 x = 5
 y = 10
 z = f(x, y)
-while z > 8{
+while (z > 8){
     z -= 1
+}
+while (z > 0){
+    if (z == 8){
+        break
+    }
 }
 print(z, "should be", 8)
 
 
-x = 0
+x = 7
 func(){
     nonlocal x
     g = func(){
@@ -337,11 +394,13 @@ func(){
            }(g)
     func(h){h()}(g)
 }()
-print(x, "should be", 2)
+print(x, "should be", 9)
 
 
 x = [5, 10, 15]
 print(x[1], "should be", 10)
+x[1] = 15
+print(x[1], "should be", 15)
 append(x, 20)
 print(x[3], "should be", 20)
 
@@ -358,6 +417,19 @@ fact_helper = func(rec){
 }
 fact = Y(fact_helper)
 print(fact(5), "should be", 120)
+
+
+print("The following should be all 1s/`true`s")
+x = [1, 2, 3, 4, 5]
+a = x[:2]
+b = x[2:]
+c = x[1:2]
+d = x[-2:]
+e = x[-2:-1]
+f = x[::-1]
+print(len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4, b[2]==5)
+print(len(c)==1, c[0]==2, len(d)==2, d[0]==4, d[1]==5, len(e)==1, e[0]==4)
+print(len(f)==5, f[0]==5, f[-1]==1, f[1]==4)
 """, False
 
     TEST2 = """
@@ -377,17 +449,6 @@ print(i)
 """, True
 
     TEST4 = """
-i = 0
-o = 0
-while i < 10_000_000 ->
-    i += 1
-    if i%2 ->
-        continue
-    o += 1
-print(i)
-""", True
-
-    TEST5 = """
 max = 10_000
 primes = [2]
 i = 2
@@ -407,17 +468,21 @@ print("the number of primes bellow", max, "is:", len(primes))
 print("the last prime is:", primes[-1])
 """, False
 
-    TEST6 = """
+    TEST5 = """
 f = func(x){
     if (x){
-        return f(x-1)+1
+        return f(x-1) + 1
     }
     return x
 }
-print(f(10_000))
+print(f(10_000), "should be", 10_000)
 """, False
 
-    TEST = TEST6
+    TEST6 = """
+""", True
+
+    # TEST1:test_all, TEST2:fib, TEST3:while++, TEST4:primes, TEST5:rec++
+    TEST = TEST1
     assert not isinstance(TEST, str), "TEST should be tuple[str,bool]"
     ast:Body = Parser(Tokeniser(StringIO(TEST[0])), colon=TEST[1]).read()
     if ast is None:

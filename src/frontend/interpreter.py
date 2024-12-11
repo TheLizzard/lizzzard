@@ -89,6 +89,11 @@ class ListValue(Value):
         return self.array[idx]
 
     @look_inside
+    def index_set(self, idx, value):
+        assert isinstance(idx, int), "TypeError"
+        self.array[idx] = value
+
+    @look_inside
     @elidable
     def len(self):
         return len(self.array)
@@ -141,7 +146,7 @@ def force_bool(val):
     return True
 
 
-BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or", "len", "idx", "[]"]
+BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or", "len", "idx", "simple_idx", "simple_idx=", "[]"]
 BUILTIN_SIDES = ["print", "append"]
 BUILTIN_OPS = list(map(str, BUILTIN_OPS))
 BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))
@@ -323,7 +328,8 @@ def _interpret(bytecode, teleports, regs):
                     value = builtin_pure(op, args, op)
                 else:
                     value = builtin_side(op, args)
-                regs[bt.regs[0]] = value
+                if bt.regs[0] > 1: # Don't store values inside ZERO,ONE
+                    regs[bt.regs[0]] = value
                 del args, pure_op, op_idx, op, value
             del tp, tp_value, func
         del bt
@@ -331,12 +337,12 @@ def _interpret(bytecode, teleports, regs):
 
 @look_inside
 def builtin_pure(op, args, op_print):
-    if op in (u"+", u"*", u"==", u"len", u"idx"):
+    if op in (u"+", u"*", u"==", u"len", u"idx", u"simple_idx"):
         if (len(args) > 0) and isinstance(args[0], ListValue):
             return builtin_pure_list(op, args, op)
         elif (len(args) == 2) and isinstance(args[1], ListValue):
             return builtin_pure_list(op, args, op)
-    elif op == u"[]":
+    elif op in (u"[]", u"simple_idx="):
         return builtin_pure_list(op, args, op)
     return builtin_pure_nonlist(op, args, op)
 
@@ -407,13 +413,73 @@ def builtin_pure_list(op, args, op_print):
         arg0, arg1, arg2, arg3 = args
         if not isinstance(arg0, ListValue):
             raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
-        if not isinstance(arg1, NoneValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the 2nd arg")
-        if not isinstance(arg2, IntValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the 3rd arg")
-        if not isinstance(arg3, NoneValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the 4th arg")
-        return arg0.index(arg2.value)
+        length = arg0.len()
+        if isinstance(arg3, NoneValue): # step
+            step = 1
+        elif isinstance(arg3, IntValue):
+            step = arg3.value
+        else:
+            raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the step arg")
+            return NONE
+        if step == 0:
+            raise_type_error(op_print + u" doesn't support 0 for the step arg")
+            return NONE
+        if isinstance(arg1, NoneValue): # start
+            start = 0 if step > 0 else length
+        elif isinstance(arg1, IntValue):
+            start = arg1.value
+            if start < 0:
+                start += length
+        else:
+            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
+            return NONE
+        if isinstance(arg2, NoneValue): # stop
+            stop = -1 if step < 0 else length
+        elif isinstance(arg2, IntValue):
+            stop = arg2.value
+            if stop < 0:
+                stop += length
+        else:
+            raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
+            return NONE
+        new = ListValue()
+        for idx in range(start, stop, step):
+            if 0 <= idx < length:
+                new.append(arg0.index(idx))
+        return new
+
+    elif op == u"simple_idx":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments (list, idx)")
+        arg0, arg1 = args
+        if not isinstance(arg0, ListValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
+        if not isinstance(arg1, IntValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
+        length = arg0.len()
+        idx = arg1.value
+        if idx < 0:
+            idx += length
+        if not (0 <= idx < length):
+            raise_index_error(u"when indexing idx=" + int_to_str(idx))
+        return arg0.index(idx)
+
+    elif op == u"simple_idx=":
+        if len(args) != 3:
+            raise_type_error(op_print + u" expects 3 arguments (list, idx, value)")
+        arg0, arg1, arg2 = args
+        if not isinstance(arg0, ListValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
+        if not isinstance(arg1, IntValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
+        length = arg0.len()
+        idx = arg1.value
+        if idx < 0:
+            idx += length
+        if not (0 <= idx < length):
+            raise_index_error(u"when setting idx=" + int_to_str(idx))
+        arg0.index_set(idx, arg2)
+        return NONE
 
     elif op == u"[]":
         new = ListValue()
@@ -505,12 +571,12 @@ def builtin_pure_nonlist(op, args, op_print):
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
             if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
+                return FALSE
             if arg0.value == arg1.value:
                 return TRUE
         elif isinstance(arg0, StrValue):
             if not isinstance(arg1, StrValue):
-                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
+                return FALSE
             if arg0.value == arg1.value:
                 return TRUE
         return FALSE
@@ -566,6 +632,29 @@ def builtin_pure_nonlist(op, args, op_print):
         arg0, arg1 = args
         return arg0 if force_bool(arg0) else arg1
 
+    elif op == u"len":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects 1 argument")
+        arg0 = args[0]
+        if not isinstance(arg0, StrValue):
+            raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        return IntValue(len(arg0.value))
+
+    elif op == u"simple_idx":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if not isinstance(arg0, StrValue):
+            raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        if not isinstance(arg1, IntValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
+        return StrValue(arg0.value[arg1.value])
+
+    elif op == u"idx":
+        if len(args) != 4:
+            raise_type_error(op_print + u" expects 4 arguments")
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
     else:
         raise_unreachable_error(u"builtin_pure " + op + u" not implemented (needed for " + op_print + u")")
 
@@ -617,8 +706,8 @@ def raise_name_error(name):
     print(u"\x1b[91mNameError: " + name + u" was not been defined\x1b[0m")
     raise_error()
 
-def raise_index_error():
-    print(u"\x1b[91mIndexError: \x1b[0m")
+def raise_index_error(msg):
+    print(u"\x1b[91mIndexError: " + msg + u"\x1b[0m")
     raise_error()
 
 def raise_type_error(msg):

@@ -14,7 +14,6 @@ import lexer
 
 
 TEST_LITERAL_PRINT:str = """
--1
 y = (0,)
 x = []
 x = [none]*6
@@ -29,7 +28,7 @@ x[3] = [[1, 2],
 (x[4], x[5]) = (5,
                 6)
 x[4], x[5] = (5, 6)
-x[4:6] = 5,6
+a,b = x[4:6:1]
 print(x)
 
 {}
@@ -47,7 +46,6 @@ print(x)
 a, b = [5, 6]
 """
 RESULT_LITERAL_PRINT:str = """
-Literal[-1]
 Var[y] = Op(·,· Literal[0])
 Var[x] = Op([] )
 Var[x] = Op(* Op([] Literal[none]), Literal[6])
@@ -57,7 +55,7 @@ Op(idx Var[x], Literal[none], Literal[2], Literal[none]) = Op(+ Literal[5.5], Li
 Op(idx Var[x], Literal[none], Literal[3], Literal[none]) = Op([] Op([] Literal[1], Literal[2]), Op([] Literal[3], Literal[4]))
 Op(·,· Op(idx Var[x], Literal[none], Literal[4], Literal[none]), Op(idx Var[x], Literal[none], Literal[5], Literal[none])) = Op(·,· Literal[5], Literal[6])
 Op(·,· Op(idx Var[x], Literal[none], Literal[4], Literal[none]), Op(idx Var[x], Literal[none], Literal[5], Literal[none])) = Op(·,· Literal[5], Literal[6])
-Op(idx Var[x], Literal[4], Literal[6], Literal[none]) = Op(·,· Literal[5], Literal[6])
+Op(·,· Var[a], Var[b]) = Op(idx Var[x], Literal[4], Literal[6], Literal[1])
 Op(call Var[print], Var[x])
 Op({:} )
 Op({:} Literal[0'x']:Literal[5])
@@ -70,6 +68,40 @@ Op({,} Literal[1], Literal[2], Literal[3])
 Op({,} Literal[1], Literal[2], Literal[3], Literal[4])
 Op({,} Literal[1], Literal[2], Literal[3], Literal[4])
 Op(·,· Var[a], Var[b]) = Op([] Literal[5], Literal[6])
+"""
+
+
+TEST_IDX:str = """
+x = "0123"
+x[2]
+x[5:]
+x[:5]
+x[:]
+x[::5]
+x[0:5:10]
+x[5::]
+x[:5:]
+print
+x[5::10]
+x[:5:10]
+x[5:10:]
+x[5:10]
+"""
+RESULT_IDX:str = """
+Var[x] = Literal[0'0123']
+Op(simple_idx Var[x], Literal[2])
+Op(idx Var[x], Literal[5], Literal[none], Literal[none])
+Op(idx Var[x], Literal[none], Literal[5], Literal[none])
+Op(idx Var[x], Literal[none], Literal[none], Literal[none])
+Op(idx Var[x], Literal[none], Literal[none], Literal[5])
+Op(idx Var[x], Literal[0], Literal[5], Literal[10])
+Op(idx Var[x], Literal[5], Literal[none], Literal[none])
+Op(idx Var[x], Literal[none], Literal[5], Literal[none])
+Var[print]
+Op(idx Var[x], Literal[5], Literal[none], Literal[10])
+Op(idx Var[x], Literal[none], Literal[5], Literal[10])
+Op(idx Var[x], Literal[5], Literal[10], Literal[none])
+Op(idx Var[x], Literal[5], Literal[10], Literal[none])
 """
 
 
@@ -316,14 +348,15 @@ RESULT_MULTI_ASSIGN:str = """
 """
 
 
+TEST_LITERAL_PRINT = RESULT_LITERAL_PRINT = ""
 if __name__ == "__main__":
     # lexer.DEBUG_THROW:bool = True
     codes = (TEST_LITERAL_PRINT, TEST_EXPR, TEST_IF, TEST_WHILE,
              TEST_FUNC, TEST_WITH, TEST_GENERATOR, TEST_CLASS,
-             TEST_MULTI_ASSIGN)
+             TEST_MULTI_ASSIGN, TEST_IDX)
     expecteds = (RESULT_LITERAL_PRINT, RESULT_EXPR, RESULT_IF, RESULT_WHILE,
                  RESULT_FUNC, RESULT_WITH, RESULT_GENERATOR, RESULT_CLASS,
-                 RESULT_MULTI_ASSIGN)
+                 RESULT_MULTI_ASSIGN, RESULT_IDX)
     # codes = ()
     for code, expected in zip(codes, expecteds):
         ast:Body = Parser(lexer.Tokeniser(StringIO(code))).read()

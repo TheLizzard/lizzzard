@@ -308,6 +308,9 @@ class Parser:
                     self._assert_check_assignable(sub_exp)
                 return None
             elif exp.op == "idx":
+                self.throw("Can't assign to multiple elements in array " \
+                           "at the same time", exp)
+            elif exp.op == "simple_idx":
                 self._assert_check_assignable(exp.args[0])
                 return None
             elif exp.op == ".":
@@ -443,19 +446,32 @@ class Parser:
         exp:Expr = self._read_expr(precedence+1, notype=notype)
         while True:
             op:Token = self.tokeniser.peek()
-            if op == "[":
-                self._assert_read("[")
-                start:Expr = self._read_expr(notype=True)
+            none:Expr = Literal(op.name_as("none"))
+            if self._try_read("["):
+                iscomplex:bool = False
                 if self._try_read(":"):
-                    end:Expr = self._read_expr(notype=True)
+                    start:Expr = none
+                    iscomplex:bool = True
                 else:
-                    start, end = Literal(op.name_as("none")), start
-                if self._try_read(":"):
-                    step:Expr = self._read_expr(notype=True)
+                    start:Expr = self._read_expr(notype=True)
+                    iscomplex:bool = self._try_read(":")
+                # I am not 100% how I managed to get this to work first try
+                if iscomplex:
+                    stop = step = none
+                    if self._try_read(":"):
+                        if self.tokeniser.peek() != "]":
+                            step:Expr = self._read_expr(notype=True)
+                    elif self.tokeniser.peek() != "]":
+                        stop:Expr = self._read_expr(notype=True)
+                        if self._try_read(":"):
+                            if self.tokeniser.peek() != "]":
+                                step:Expr = self._read_expr(notype=True)
+                    exp:Expr = Op(get_first_token(exp), op.name_as("idx"), exp,
+                                  start, stop, step)
                 else:
-                    step:Expr = Literal(op.name_as("none"))
-                exp:Expr = Op(get_first_token(exp), op.name_as("idx"), exp,
-                              start, end, step)
+                    exp:Expr = Op(get_first_token(exp), \
+                                  op.name_as("simple_idx"), exp,
+                                  start)
                 self._assert_read("]", "Expected ] character")
             elif op == "(":
                 if ismacro:
@@ -613,7 +629,7 @@ class Parser:
             value:Expr = self._read_expr(1) # don't read commas
             if not isinstance(exp, Var):
                 self.tokeniser.throw("expression cannot contain assignment, " \
-                                     'perhaps you meant "=="?', err_token)
+                                     'perhaps you meant "=="', err_token)
             assert isinstance(exp, Var), "Impossible"
             exp.default:Expr = value
         else:

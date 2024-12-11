@@ -92,7 +92,6 @@ class Var(Expr):
             return f"Var[{self.identifier}]"
         else:
             return f"Var[{self.identifier} default={self.default}]"
-Assignable:type = Expr|Var
 
 
 class Literal(Expr):
@@ -121,6 +120,7 @@ class Op(Expr):
 
     def __repr__(self) -> str:
         return f"Op({self.op} {repr(self.args)[1:-1]})"
+Assignable:type = Op|Var
 
 
 class If:
