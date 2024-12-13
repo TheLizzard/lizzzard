@@ -9,7 +9,8 @@ from asts.ccast import *
 from parser import *
 from lexer import *
 
-CLEAR_REGS:bool = True # Should we clear regs after use so they are always none?
+# Should we clear regs after use so they are always none?
+CLEAR_REGS:bool = True
 
 
 class Labels:
@@ -144,7 +145,8 @@ class ByteCoder:
                         for exp in target.args:
                             args.append(self._convert(exp, state))
                         tmp_reg:int = state.regs.get_free_reg()
-                        state.block.append(BStoreLoad("simple_idx=", tmp_reg, False))
+                        state.block.append(BStoreLoad("simple_idx=", tmp_reg,
+                                                      False))
                         state.block.append(BCall([0,tmp_reg] + args + [reg]))
                         state.regs.free_reg(tmp_reg, state.block)
                         for tmp_reg in args:
@@ -475,7 +477,7 @@ f = func(x){
     }
     return x
 }
-print(f(10_000), "should be", 10_000)
+print(f(100_000), "should be", 100_000)
 """, False
 
     TEST6 = """

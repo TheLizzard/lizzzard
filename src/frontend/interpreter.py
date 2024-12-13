@@ -166,6 +166,27 @@ def reg_index(regs, idx):
     else:
         return regs[idx]
 
+@look_inside
+@elidable
+def get_scope(env, name):
+    value = env.get(name, None)
+    if not isinstance(value, LinkValue):
+        return env
+    for i in range(value.link):
+        env_holder = env.get(u"$prev_env", None)
+        assert isinstance(env_holder, FuncValue), "InternalNonlocalError"
+        env = env_holder.master
+    return env
+
+@look_inside
+@elidable
+def get_from_scope_err(env, name):
+    value = env.get(name, None)
+    if value is None:
+        raise_name_error(name)
+    return value
+
+
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
     data = bytes2(data_unicode)
@@ -225,26 +246,11 @@ def _interpret(bytecode, teleports, regs):
         elif isinstance(bt, BLoadLink):
             env[bt.name] = LinkValue(bt.link)
         elif isinstance(bt, BStoreLoad):
-            # Get the correct scope
-            value = env.get(bt.name, None)
-            if isinstance(value, LinkValue):
-                var_env = env
-                for _ in range(value.link):
-                    var_env_holder = var_env.get(u"$prev_env", None)
-                    assert isinstance(var_env_holder, FuncValue), "InternalNonlocalError"
-                    var_env = var_env_holder.master
-                    del var_env_holder, _
-            else:
-                var_env = env
-            # Store/load bt.name from scope
+            scope = get_scope(env, bt.name) # Reads LinkValue
             if bt.storing:
-                var_env[bt.name] = reg_index(regs, bt.reg)
+                scope[bt.name] = reg_index(regs, bt.reg)
             else:
-                value = var_env.get(bt.name, None)
-                if value is None:
-                    raise_name_error(bt.name)
-                regs[bt.reg] = value
-            del value, var_env
+                regs[bt.reg] = get_from_scope_err(scope, bt.name)
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
             if bt.type == BLiteral.INT_T:
