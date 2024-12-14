@@ -264,8 +264,8 @@ class ByteCoder:
             #   jmp while_start
             # while_end:
             while_id:int = self._labels.get_fl()
-            label_start:Bable = Bable("while_"+str(while_id)+"_start")
-            label_end:Bable = Bable("while_"+str(while_id)+"_end")
+            label_start:Bable = Bable(f"while_{while_id}_start")
+            label_end:Bable = Bable(f"while_{while_id}_end")
             state.block.append(label_start)
             reg:int = self._convert(cmd.exp, state)
             state.block.append(BJump(label_end.id, reg, True))
@@ -289,8 +289,7 @@ class ByteCoder:
             func_id:int = self._labels.get_fl()
             res_reg:int = state.regs.get_free_reg()
 
-            label_start:Bable = Bable(f"func_{func_id}_start")
-            label_end:Bable = Bable(f"func_{func_id}_end")
+            label_start:Bable = Bable(f"{func_id}")
             nstate:State = state.copy()
             nstate.nonlocals = {name:link+1
                                 for name,link in state.nonlocals.items()}
@@ -311,7 +310,7 @@ class ByteCoder:
                 nstate.block.append(BLiteral(reg, BLiteralEmpty(),
                                              BLiteral.NONE_T))
             nstate.block.append(BRegMove(2, reg))
-            state.block.append(BLiteral(res_reg, BLiteralStr(label_start.id),
+            state.block.append(BLiteral(res_reg, BLiteralInt(func_id),
                                         BLiteral.FUNC_T))
 
         elif isinstance(cmd, NonLocal):
@@ -364,7 +363,7 @@ c = func(f){
 }
 x = 5
 y = 2
-print(c(f(x+y)), "should be", 7)
+print(0, "should be", c(f(x+y))-7)
 
 
 f = func(x, y){
@@ -373,19 +372,27 @@ f = func(x, y){
 x = 5
 y = 10
 z = f(x, y)
-while (z > 8){
+while (z > 5){
     z -= 1
 }
 while (z > 0){
-    if (z == 8){
+    if (z == 5){
         break
     }
 }
-print(z, "should be", 8)
+print(5, "should be", z)
 
 
-x = 7
-func(){
+x = [5, 10, 15]
+print(10, "should be", x[1])
+x[1] = 15
+print(15, "should be", x[1])
+append(x, 20)
+print(20, "should be", x[3])
+
+
+x = 21
+tmp = func(){
     nonlocal x
     g = func(){
         nonlocal x
@@ -395,16 +402,14 @@ func(){
             func(a){a()}(h)
            }(g)
     func(h){h()}(g)
+    return [g, (func(){nonlocal x; return x})]
 }()
-print(x, "should be", 9)
-
-
-x = [5, 10, 15]
-print(x[1], "should be", 10)
-x[1] = 15
-print(x[1], "should be", 15)
-append(x, 20)
-print(x[3], "should be", 20)
+add = tmp[0]
+get = tmp[1]
+add()
+add()
+print(25, "should be", x)
+print(30, "should be", get()+5)
 
 
 Y = func(f){
@@ -418,7 +423,7 @@ fact_helper = func(rec){
     }
 }
 fact = Y(fact_helper)
-print(fact(5), "should be", 120)
+print(120, "should be", fact(5))
 
 
 print("The following should be all 1s/`true`s")
@@ -429,9 +434,9 @@ c = x[1:2]
 d = x[-2:]
 e = x[-2:-1]
 f = x[::-1]
-print(len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4, b[2]==5)
-print(len(c)==1, c[0]==2, len(d)==2, d[0]==4, d[1]==5, len(e)==1, e[0]==4)
-print(len(f)==5, f[0]==5, f[-1]==1, f[1]==4)
+print("\t", len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4, b[2]==5,
+      len(c)==1, c[0]==2, len(d)==2, d[0]==4, d[1]==5, len(e)==1, e[0]==4,
+      len(f)==5, f[0]==5, f[-1]==1, f[1]==4)
 """, False
 
     TEST2 = """
@@ -466,8 +471,8 @@ while (i < max){
     }
     append(primes, i)
 }
-print("the number of primes bellow", max, "is:", len(primes))
-print("the last prime is:", primes[-1])
+print("the number of primes bellow", max, "is:", len(primes), "which should be", 1229)
+print("the last prime is:", primes[-1], "which should be", 9973)
 """, False
 
     TEST5 = """

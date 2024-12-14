@@ -188,10 +188,10 @@ class BLiteral(Bast):
         self.reg = const(reg)
 
     def serialise(self):
-        if self.type == BLiteral.INT_T:
+        if self.type in (BLiteral.INT_T, BLiteral.PROC_T, BLiteral.FUNC_T):
             assert isinstance(self.literal, BLiteralInt), "TypeError"
             literal = serialise_int(self.literal.int_value, INT_LITERAL_SIZE)
-        elif self.type in (BLiteral.STR_T, BLiteral.PROC_T, BLiteral.FUNC_T):
+        elif self.type == BLiteral.STR_T:
             assert isinstance(self.literal, BLiteralStr), "TypeError"
             literal = serialise_str(self.literal.str_value, STR_LITERAL_SIZE)
         elif self.type in (BLiteral.NONE_T, BLiteral.LIST_T):
@@ -207,10 +207,10 @@ def BLiteral_derialise(data, Cls=BLiteral):
     data = assert_ast_t_id(data, Cls.AST_T_ID)
     reg, data = derialise_int(data, REG_SIZE)
     type, data = derialise_int(data, REG_SIZE)
-    if type == BLiteral.INT_T:
+    if type in (BLiteral.INT_T, BLiteral.PROC_T, BLiteral.FUNC_T):
         raw_literal, data = derialise_int(data, INT_LITERAL_SIZE)
         literal = BLiteralInt(raw_literal)
-    elif type in (BLiteral.STR_T, BLiteral.FUNC_T, BLiteral.PROC_T):
+    elif type == BLiteral.STR_T:
         raw_literal, data = derialise_str(data, STR_LITERAL_SIZE)
         literal = BLiteralStr(raw_literal)
     elif type in (BLiteral.NONE_T, BLiteral.LIST_T):
@@ -303,7 +303,7 @@ def BLoadLink_derialise(data, Cls=BLoadLink):
 
 
 def reg_to_str(reg):
-    return u"Reg[%s]" % int_to_str(reg)
+    return u"reg[" + int_to_str(reg) + u"]"
 
 def bytecode_list_to_str(bytecodes, mini=False):
     tab = u"" if mini else u"\t"
@@ -315,7 +315,7 @@ def bytecode_list_to_str(bytecodes, mini=False):
         if isinstance(bt, Bable):
             output += bt.id + u":"
         elif isinstance(bt, BLoadLink):
-            output += tab + u"Name[" + bt.name + u"]:=link[" + \
+            output += tab + u"name[" + bt.name + u"]:=link[" + \
                       int_to_str(bt.link) + u"]"
         elif isinstance(bt, BCall):
             output += tab + reg_to_str(bt.regs[0]) + u":=" + \
@@ -324,32 +324,35 @@ def bytecode_list_to_str(bytecodes, mini=False):
                       u")"
         elif isinstance(bt, BStoreLoad):
             if bt.storing:
-                output += tab + u"Name[" + bt.name + u"]:=" + \
+                output += tab + u"name[" + bt.name + u"]:=" + \
                           reg_to_str(int(bt.reg))
             else:
-                output += tab + reg_to_str(bt.reg) + u":=Name[" + bt.name + \
+                output += tab + reg_to_str(bt.reg) + u":=name[" + bt.name + \
                           u"]"
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
-            if isinstance(bt_literal, BLiteralInt):
-                literal = int_to_str(bt_literal.int_value)
-            elif isinstance(bt_literal, BLiteralStr):
-                literal = bt_literal.str_value
-            elif isinstance(bt_literal, BLiteralEmpty):
-                if bt.type == BLiteral.NONE_T:
+            if bt.type == BLiteral.FUNC_T:
+                assert isinstance(bt_literal, BLiteralInt), "TypeError"
+                literal = u"func[" + int_to_str(bt_literal.int_value) + u"]"
+            elif bt.type == BLiteral.PROC_T:
+                assert isinstance(bt_literal, BLiteralInt), "TypeError"
+                literal = u"proc[" + int_to_str(bt_literal.int_value) + u"]"
+            elif bt.type == BLiteral.NONE_T:
                     literal = u"none"
-                elif bt.type == BLiteral.LIST_T:
-                    literal = u"[]"
-                else:
-                    literal = u"impossible"
+            elif bt.type == BLiteral.LIST_T:
+                    literal = u"list"
+            elif bt.type == BLiteral.INT_T:
+                assert isinstance(bt_literal, BLiteralInt), "TypeError"
+                literal = int_to_str(bt_literal.int_value)
+            elif bt.type == BLiteral.STR_T:
+                assert isinstance(bt_literal, BLiteralStr), "TypeError"
+                literal = u'"' + bt_literal.str_value[1:] + u'"'
             else:
                 literal = u"unknown"
-            output += tab + reg_to_str(bt.reg) + u":=Literal[" + literal + \
-                      u"]"
+            output += tab + reg_to_str(bt.reg) + u":=" + literal
         elif isinstance(bt, BJump):
-            output += tab + u"jumpif(" + reg_to_str(bt.condition_reg) + \
-                      (u"=" if bt.negated else u"!") + \
-                      u"=0)=>" + bt.label
+            output += tab + u"jumpif(" + (u"!" if bt.negated else u"") + \
+                      reg_to_str(bt.condition_reg) + u")=>" + bt.label
         elif isinstance(bt, BRegMove):
             output += tab + reg_to_str(bt.reg1) + u":=" + reg_to_str(bt.reg2)
         else:

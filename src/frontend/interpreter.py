@@ -48,13 +48,13 @@ class FuncValue(Value):
     __slots__ = "tp", "master"
 
     def __init__(self, tp, master):
-        # assert isinstance(master, dict), "TypeError"
-        assert isinstance(tp, str), "TypeError"
+        assert isinstance(master, Dict), "TypeError"
+        assert isinstance(tp, int), "TypeError"
         self.master = master
         self.tp = tp
 
     def __repr__(self):
-        return u"FuncValue[tp=" + self.tp + u"]"
+        return u"FuncValue[tp=" + int_to_str(self.tp) + u"]"
 
 
 class LinkValue(Value):
@@ -126,6 +126,10 @@ def get_type(value):
         return u"str"
     if isinstance(value, LinkValue):
         return u"link"
+    if isinstance(value, ListValue):
+        return u"list"
+    if isinstance(value, FuncValue):
+        return u"func"
     if value == NONE:
         return u"none"
     return u"unknown"
@@ -166,26 +170,6 @@ def reg_index(regs, idx):
     else:
         return regs[idx]
 
-@look_inside
-@elidable
-def get_scope(env, name):
-    value = env.get(name, None)
-    if not isinstance(value, LinkValue):
-        return env
-    for i in range(value.link):
-        env_holder = env.get(u"$prev_env", None)
-        assert isinstance(env_holder, FuncValue), "InternalNonlocalError"
-        env = env_holder.master
-    return env
-
-@look_inside
-@elidable
-def get_from_scope_err(env, name):
-    value = env.get(name, None)
-    if value is None:
-        raise_name_error(name)
-    return value
-
 
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
@@ -219,8 +203,9 @@ class Interpreter:
             if isinstance(bt, Bable):
                 teleports[const(const_str(bt.id))] = const(IntValue(const(i)))
         for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
-            teleports[const(const_str(op))] = const(IntValue(const(len(self.bytecode)+i)))
-        regs = new_regs(self.frame_size)
+            tp = len(self.bytecode) + i
+            teleports[const(const_str(int_to_str(tp)))] = const(IntValue(tp))
+        regs = [NONE]*(self.frame_size+2)
         _interpret(self.bytecode, teleports, regs)
 
 
@@ -231,7 +216,7 @@ def _interpret(bytecode, teleports, regs):
     env = Dict()
     for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
         assert isinstance(op, str), "TypeError"
-        env[op] = FuncValue(op, env)
+        env[op] = FuncValue(i+len(bytecode), env)
 
     while pc < len(bytecode):
         if USE_JIT:
@@ -242,23 +227,35 @@ def _interpret(bytecode, teleports, regs):
         pc += 1
 
         if isinstance(bt, Bable):
-            pass
+            if USE_JIT:
+                jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc-1, bytecode=bytecode, teleports=teleports)
         elif isinstance(bt, BLoadLink):
             env[bt.name] = LinkValue(bt.link)
         elif isinstance(bt, BStoreLoad):
-            scope = get_scope(env, bt.name) # Reads LinkValue
+            scope, value = env, env.get(bt.name, None)
+            # Get the correct scope
+            if isinstance(value, LinkValue):
+                for i in range(value.link):
+                    scope_holder = scope.get(u"$prev_env", None)
+                    assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
+                    scope = scope_holder.master
+                if not bt.storing:
+                    value = scope.get(bt.name, None)
+            # Store/Load variable
             if bt.storing:
                 scope[bt.name] = reg_index(regs, bt.reg)
             else:
-                regs[bt.reg] = get_from_scope_err(scope, bt.name)
+                if value is None:
+                    raise_name_error(bt.name)
+                regs[bt.reg] = value
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
             if bt.type == BLiteral.INT_T:
                 assert isinstance(bt_literal, BLiteralInt), "TypeError"
                 literal = IntValue(bt_literal.int_value)
             elif bt.type == BLiteral.FUNC_T:
-                assert isinstance(bt_literal, BLiteralStr), "TypeError"
-                literal = FuncValue(bt_literal.str_value, env)
+                assert isinstance(bt_literal, BLiteralInt), "TypeError"
+                literal = FuncValue(bt_literal.int_value, env)
             elif bt.type == BLiteral.STR_T:
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
                 literal = StrValue(bt_literal.str_value)
@@ -272,19 +269,17 @@ def _interpret(bytecode, teleports, regs):
             del literal, bt_literal
         elif isinstance(bt, BJump):
             # WARNING: Bjump always clears condition reg!!!
+            value = reg_index(regs, bt.condition_reg)
             if bt.condition_reg > 1:
-                regs[bt.condition_reg], value = NONE, reg_index(regs, bt.condition_reg)
-            else:
-                value = reg_index(regs, bt.condition_reg)
+                regs[bt.condition_reg] = NONE
             condition = force_bool(value)
             # if condition != bt.negated: # RPython's JIT can't constant fold bt.negated in this form :/
             if (condition and (not bt.negated)) or ((not condition) and bt.negated):
                 tp = teleports.get(bt.label, None)
                 assert isinstance(tp, IntValue), "TypeError"
-                old_pc, pc = pc, tp.value
-                if USE_JIT and (pc < old_pc):
-                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
-                del tp, old_pc
+                pc = tp.value
+                assert isinstance(bytecode[pc], Bable), "InternalError"
+                del tp
             del value
         elif isinstance(bt, BRegMove):
             if bt.reg1 == 2:
@@ -295,7 +290,7 @@ def _interpret(bytecode, teleports, regs):
                     print(u"[EXIT]: " + int_to_str(ret_val.value))
                     break
                 env, regs, pc, res_reg = stack.pop()
-                regs[const(res_reg)] = ret_val
+                regs[res_reg] = ret_val
                 del ret_val
             else:
                 regs[bt.reg1] = reg_index(regs, bt.reg2)
@@ -304,24 +299,22 @@ def _interpret(bytecode, teleports, regs):
             if not isinstance(func, FuncValue):
                 raise_type_error(get_type(func) + u" is not callable")
             assert isinstance(func, FuncValue), "TypeError"
-            tp = teleports.get(func.tp, None)
+            tp = teleports.get(int_to_str(func.tp), None)
             if tp is None:
-                raise_name_error(func.tp)
+                raise_name_error(int_to_str(func.tp))
             assert isinstance(tp, IntValue), "TypeError"
             tp_value = const(tp.value)
             if tp_value < len(bytecode):
                 pc, old_pc = tp_value, pc
                 stack.append((env,regs,old_pc,bt.regs[0]))
-                old_regs, regs = regs, new_regs(len(regs)-2) # Don't forget to account for Reg[0] and Reg[1] from len(regs)
+                old_regs, regs = regs, list(regs)
                 assert len(old_regs) == len(regs), "InternalError"
-                new_env = func.master.copy()
-                new_env[u"$prev_env"] = func
-                env = new_env
+                env = func.master.copy()
+                env[u"$prev_env"] = func
                 for i in range(2, len(bt.regs)):
                     regs[i+1] = old_regs[bt.regs[i]]
-                del old_regs, new_env
-                if USE_JIT and (pc < old_pc):
-                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
+                assert isinstance(bytecode[pc], Bable), "InternalError"
+                del old_regs
             else: # Built-ins
                 op_idx = tp_value - len(bytecode)
                 pure_op = op_idx < len(BUILTIN_OPS)

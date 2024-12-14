@@ -19,7 +19,7 @@ if PYTHON == 2:
     try:
         from rpython.rlib.jit import JitDriver, elidable, promote, \
                                      promote_unicode, jit_debug, hint, \
-                                     look_inside
+                                     look_inside, dont_look_inside
         from rpython.rlib.objectmodel import specialize
         from rpython.rlib.nonconst import NonConstant
         never = lambda: NonConstant(False)
@@ -48,8 +48,10 @@ if NO_RPYTHON:
     promote = identity
     hint = identity_kw
     jit_debug = lambda s: None
+    NonConstant = identity
     look_inside = identity
     never = lambda: None
+    dont_look_inside = identity
 
 const_str = promote_unicode
 const = promote

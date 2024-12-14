@@ -25,12 +25,10 @@ class Dict:
         return default
 
     @look_inside
-    @elidable
     def copy(self):
         ret = Dict()
         for i, bucket in enumerate(self.buckets):
-            for key, value in bucket:
-                ret.buckets[i].append((key, value))
+            ret.buckets[i].extend(bucket)
         return ret
 
     @look_inside
@@ -41,14 +39,6 @@ class Dict:
                 arr[i] = (key, value)
                 return
         arr.append((key, value))
-
-    @look_inside
-    @elidable
-    def __contains__(self, key):
-        for k, v in self.buckets[self._hash(key)]:
-            if k == key:
-                return True
-        return False
 
     @look_inside
     @elidable
