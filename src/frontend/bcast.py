@@ -72,6 +72,10 @@ AST_T_ID_SIZE = 1 # Size of free_ast_id
 LABEL_SIZE = 1 # Bable label size
 NAME_SIZE = 1 # Variable name size
 
+LINK_SIZE = 1 # number of bytes used to store the link
+ENV_SIZE_SIZE = 2 # number of bytes used to store the env_size of a func
+FUNC_ID_SIZE = 2 # number of bytes used to store the func label
+
 
 class Bast:
     __slots__ = "err_idx"
@@ -90,10 +94,10 @@ class Bable(Bast):
         return serialise_ast_t_id(self.AST_T_ID) + \
                serialise_str(self.id, LABEL_SIZE)
 
-def Bable_derialise(data, Cls=Bable):
-    data = assert_ast_t_id(data, Cls.AST_T_ID)
-    id, data = derialise_str(data, LABEL_SIZE)
-    return Bable(id), data
+    def derialise(data):
+        data = assert_ast_t_id(data, Bable.AST_T_ID)
+        id, data = derialise_str(data, LABEL_SIZE)
+        return Bable(id), data
 
 
 class BCall(Bast):
@@ -112,13 +116,13 @@ class BCall(Bast):
         return serialise_ast_t_id(self.AST_T_ID) + \
                serialise_list_int(self.regs, 1, REG_SIZE)
 
-def BCall_derialise(data, Cls=BCall):
-    data = assert_ast_t_id(data, Cls.AST_T_ID)
-    regs, data = derialise_list_int(data, 1, REG_SIZE)
-    return BCall(regs), data
+    def derialise(data):
+        data = assert_ast_t_id(data, BCall.AST_T_ID)
+        regs, data = derialise_list_int(data, 1, REG_SIZE)
+        return BCall(regs), data
 
 
-class BStoreLoad(Bast):
+class BStoreLoadDictEnv(Bast):
     _immutable_fields_ = ["name", "reg", "storing"]
     AST_T_ID = free_ast_t_id()
     __slots__ = "name", "reg", "storing"
@@ -138,29 +142,70 @@ class BStoreLoad(Bast):
                serialise_int(self.reg, REG_SIZE) + \
                serialise_int(self.storing, 1)
 
-def BStoreLoad_derialise(data, Cls=BStoreLoad):
-    data = assert_ast_t_id(data, Cls.AST_T_ID)
-    name, data = derialise_str(data, NAME_SIZE)
-    reg, data = derialise_int(data, REG_SIZE)
-    storing, data = derialise_int(data, 1)
-    assert 0 <= storing <= 1, "ValueError"
-    return BStoreLoad(name, reg, bool(storing)), data
+    def derialise(data):
+        data = assert_ast_t_id(data, BStoreLoadDictEnv.AST_T_ID)
+        name, data = derialise_str(data, NAME_SIZE)
+        reg, data = derialise_int(data, REG_SIZE)
+        storing, data = derialise_int(data, 1)
+        assert 0 <= storing <= 1, "ValueError"
+        return BStoreLoadDictEnv(name, reg, bool(storing)), data
+
+
+class BStoreLoadListEnv(Bast):
+    _immutable_fields_ = ["link", "name", "reg", "storing"]
+    AST_T_ID = free_ast_t_id()
+    __slots__ = "link", "name", "reg", "storing"
+
+    def __init__(self, link, name, reg, storing):
+        assert isinstance(storing, bool), "TypeError"
+        assert isinstance(link, int), "TypeError"
+        assert isinstance(name, int), "TypeError"
+        assert isinstance(reg, int), "TypeError"
+        assert reg >= 0, "ValueError"
+        self.storing = const(storing)
+        self.link = const(link)
+        self.name = const(name)
+        self.reg = const(reg)
+
+    def serialise(self):
+        return serialise_ast_t_id(self.AST_T_ID) + \
+               serialise_int(self.link, LINK_SIZE) + \
+               serialise_int(self.name, ENV_SIZE_SIZE) + \
+               serialise_int(self.reg, REG_SIZE) + \
+               serialise_int(self.storing, 1)
+
+    def derialise(data):
+        data = assert_ast_t_id(data, BStoreLoadListEnv.AST_T_ID)
+        link, data = derialise_int(data, LINK_SIZE)
+        name, data = derialise_int(data, ENV_SIZE_SIZE)
+        reg, data = derialise_int(data, REG_SIZE)
+        storing, data = derialise_int(data, 1)
+        assert 0 <= storing <= 1, "ValueError"
+        return BStoreLoadListEnv(link, name, reg, bool(storing)), data
 
 
 class BLiteralHolder:
     __slots__ = ()
 class BLiteralInt(BLiteralHolder):
-    _immutable_fields_ = ["int_value"]
-    __slots__ = "int_value"
+    _immutable_fields_ = ["value"]
+    __slots__ = "value"
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
-        self.int_value = const(value)
+        self.value = const(value)
 class BLiteralStr(BLiteralHolder):
-    _immutable_fields_ = ["str_value"]
-    __slots__ = "str_value"
+    _immutable_fields_ = ["value"]
+    __slots__ = "value"
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
-        self.str_value = const(const_str(value))
+        self.value = const(const_str(value))
+class BLiteralFunc(BLiteralHolder):
+    _immutable_fields_ = ["env_size", "value"]
+    __slots__ = "env_size", "value"
+    def __init__(self, env_size, value):
+        assert isinstance(env_size, int), "TypeError"
+        assert isinstance(value, int), "TypeError"
+        self.env_size = const(env_size)
+        self.value = const(value)
 class BLiteralEmpty(BLiteralHolder):
     _immutable_fields_ = []
     __slots__ = ()
@@ -188,12 +233,16 @@ class BLiteral(Bast):
         self.reg = const(reg)
 
     def serialise(self):
-        if self.type in (BLiteral.INT_T, BLiteral.PROC_T, BLiteral.FUNC_T):
+        if self.type == BLiteral.INT_T:
             assert isinstance(self.literal, BLiteralInt), "TypeError"
-            literal = serialise_int(self.literal.int_value, INT_LITERAL_SIZE)
+            literal = serialise_int(self.literal.value, INT_LITERAL_SIZE)
+        elif self.type in (BLiteral.PROC_T, BLiteral.FUNC_T):
+            assert isinstance(self.literal, BLiteralFunc), "TypeError"
+            literal = serialise_int(self.literal.env_size, ENV_SIZE_SIZE)
+            literal += serialise_int(self.literal.value, FUNC_ID_SIZE)
         elif self.type == BLiteral.STR_T:
             assert isinstance(self.literal, BLiteralStr), "TypeError"
-            literal = serialise_str(self.literal.str_value, STR_LITERAL_SIZE)
+            literal = serialise_str(self.literal.value, STR_LITERAL_SIZE)
         elif self.type in (BLiteral.NONE_T, BLiteral.LIST_T):
             literal = b""
         else:
@@ -203,22 +252,26 @@ class BLiteral(Bast):
                serialise_int(self.type, REG_SIZE) + \
                literal
 
-def BLiteral_derialise(data, Cls=BLiteral):
-    data = assert_ast_t_id(data, Cls.AST_T_ID)
-    reg, data = derialise_int(data, REG_SIZE)
-    type, data = derialise_int(data, REG_SIZE)
-    if type in (BLiteral.INT_T, BLiteral.PROC_T, BLiteral.FUNC_T):
-        raw_literal, data = derialise_int(data, INT_LITERAL_SIZE)
-        literal = BLiteralInt(raw_literal)
-    elif type == BLiteral.STR_T:
-        raw_literal, data = derialise_str(data, STR_LITERAL_SIZE)
-        literal = BLiteralStr(raw_literal)
-    elif type in (BLiteral.NONE_T, BLiteral.LIST_T):
-        literal = BNONE
-    else:
-        raise ValueError("InvalidType")
-    assert isinstance(literal, BLiteralHolder), "TypeError"
-    return BLiteral(reg, literal, type), data
+    def derialise(data):
+        data = assert_ast_t_id(data, BLiteral.AST_T_ID)
+        reg, data = derialise_int(data, REG_SIZE)
+        type, data = derialise_int(data, REG_SIZE)
+        if type == BLiteral.INT_T:
+            raw_literal, data = derialise_int(data, INT_LITERAL_SIZE)
+            literal = BLiteralInt(raw_literal)
+        elif type in (BLiteral.PROC_T, BLiteral.FUNC_T):
+            env_size, data = derialise_int(data, ENV_SIZE_SIZE)
+            raw_literal, data = derialise_int(data, FUNC_ID_SIZE)
+            literal = BLiteralFunc(env_size, raw_literal)
+        elif type == BLiteral.STR_T:
+            raw_literal, data = derialise_str(data, STR_LITERAL_SIZE)
+            literal = BLiteralStr(raw_literal)
+        elif type in (BLiteral.NONE_T, BLiteral.LIST_T):
+            literal = BNONE
+        else:
+            raise ValueError("InvalidType")
+        assert isinstance(literal, BLiteralHolder), "TypeError"
+        return BLiteral(reg, literal, type), data
 
 BNONE = BLiteralEmpty()
 
@@ -244,13 +297,13 @@ class BJump(Bast):
                serialise_int(self.negated, 1) + \
                serialise_int(self.condition_reg, REG_SIZE)
 
-def BJump_derialise(data, Cls=BJump):
-    data = assert_ast_t_id(data, Cls.AST_T_ID)
-    label, data = derialise_str(data, LABEL_SIZE)
-    negated, data = derialise_int(data, REG_SIZE)
-    condition_reg, data = derialise_int(data, REG_SIZE)
-    assert 0 <= negated <= 1, "ValueError"
-    return BJump(label, condition_reg, bool(negated)), data
+    def derialise(data):
+        data = assert_ast_t_id(data, BJump.AST_T_ID)
+        label, data = derialise_str(data, LABEL_SIZE)
+        negated, data = derialise_int(data, REG_SIZE)
+        condition_reg, data = derialise_int(data, REG_SIZE)
+        assert 0 <= negated <= 1, "ValueError"
+        return BJump(label, condition_reg, bool(negated)), data
 
 
 class BRegMove(Bast):
@@ -273,11 +326,11 @@ class BRegMove(Bast):
                serialise_int(self.reg1, REG_SIZE) + \
                serialise_int(self.reg2, REG_SIZE)
 
-def BRegMove_derialise(data, Cls=BRegMove):
-    data = assert_ast_t_id(data, Cls.AST_T_ID)
-    reg1, data = derialise_int(data, REG_SIZE)
-    reg2, data = derialise_int(data, REG_SIZE)
-    return BRegMove(reg1, reg2), data
+    def derialise(data):
+        data = assert_ast_t_id(data, BRegMove.AST_T_ID)
+        reg1, data = derialise_int(data, REG_SIZE)
+        reg2, data = derialise_int(data, REG_SIZE)
+        return BRegMove(reg1, reg2), data
 
 
 class BLoadLink(Bast):
@@ -295,15 +348,20 @@ class BLoadLink(Bast):
                serialise_int(self.link, 1) + \
                serialise_str(self.name, NAME_SIZE)
 
-def BLoadLink_derialise(data, Cls=BLoadLink):
-    data = assert_ast_t_id(data, Cls.AST_T_ID)
-    link, data = derialise_int(data, 1)
-    name, data = derialise_str(data, NAME_SIZE)
-    return BLoadLink(name, link), data
+    def derialise(data):
+        data = assert_ast_t_id(data, BLoadLink.AST_T_ID)
+        link, data = derialise_int(data, 1)
+        name, data = derialise_str(data, NAME_SIZE)
+        return BLoadLink(name, link), data
 
 
 def reg_to_str(reg):
     return u"reg[" + int_to_str(reg) + u"]"
+
+def env_list_to_str(name, link):
+    if link == 0:
+        return u"nameidx[" + int_to_str(name) + u"]"
+    return u"linked" + int_to_str(link) + u"[" + int_to_str(name) + u"]"
 
 def bytecode_list_to_str(bytecodes, mini=False):
     tab = u"" if mini else u"\t"
@@ -322,31 +380,40 @@ def bytecode_list_to_str(bytecodes, mini=False):
                       reg_to_str(bt.regs[1]) + u"(" + \
                       u",".join([reg_to_str(i) for i in bt.regs[2:]]) + \
                       u")"
-        elif isinstance(bt, BStoreLoad):
+        elif isinstance(bt, BStoreLoadDictEnv):
             if bt.storing:
                 output += tab + u"name[" + bt.name + u"]:=" + \
                           reg_to_str(int(bt.reg))
             else:
                 output += tab + reg_to_str(bt.reg) + u":=name[" + bt.name + \
                           u"]"
+        elif isinstance(bt, BStoreLoadListEnv):
+            if bt.storing:
+                output += tab + env_list_to_str(bt.name, bt.link) + u":=" + \
+                          reg_to_str(int(bt.reg))
+            else:
+                output += tab + reg_to_str(bt.reg) + u":=" + \
+                          env_list_to_str(bt.name, bt.link)
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
-            if bt.type == BLiteral.FUNC_T:
-                assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                literal = u"func[" + int_to_str(bt_literal.int_value) + u"]"
-            elif bt.type == BLiteral.PROC_T:
-                assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                literal = u"proc[" + int_to_str(bt_literal.int_value) + u"]"
+            if bt.type in (BLiteral.FUNC_T, BLiteral.PROC_T):
+                if bt.type == BLiteral.FUNC_T:
+                    t = u"func"
+                else:
+                    t = u"proc"
+                assert isinstance(bt_literal, BLiteralFunc), "TypeError"
+                literal = t + u"[" + int_to_str(bt_literal.value) + u", " + \
+                          u"env_size=" + int_to_str(bt_literal.env_size) + u"]"
             elif bt.type == BLiteral.NONE_T:
                     literal = u"none"
             elif bt.type == BLiteral.LIST_T:
                     literal = u"list"
             elif bt.type == BLiteral.INT_T:
                 assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                literal = int_to_str(bt_literal.int_value)
+                literal = int_to_str(bt_literal.value)
             elif bt.type == BLiteral.STR_T:
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
-                literal = u'"' + bt_literal.str_value[1:] + u'"'
+                literal = u'"' + bt_literal.value[1:] + u'"'
             else:
                 literal = u"unknown"
             output += tab + reg_to_str(bt.reg) + u":=" + literal
@@ -362,28 +429,90 @@ def bytecode_list_to_str(bytecodes, mini=False):
     return output
 
 
-BAST_TYPES = [Bable, BCall, BStoreLoad, BLiteral, BJump, BRegMove, BLoadLink]
-DERIALISE = {Bable:Bable_derialise, BCall:BCall_derialise,
-             BStoreLoad:BStoreLoad_derialise, BLiteral:BLiteral_derialise,
-             BJump:BJump_derialise, BRegMove:BRegMove_derialise,
-             BLoadLink:BLoadLink_derialise}
-TABLE = {T.AST_T_ID:DERIALISE[T] for T in BAST_TYPES}
+BAST_TYPES = [Bable, BCall, BStoreLoadDictEnv, BStoreLoadListEnv, BLiteral,
+              BJump, BRegMove, BLoadLink]
+TABLE = {T.AST_T_ID:T.derialise for T in BAST_TYPES}
 
 
 VERSION = 1
 FRAME_SIZE = 1 # number of bytes that hold the max frame size
 VERSION_SIZE = 4 # number of bytes to store the version
+BASIC_FLAG_SIZE = 16 # bits for basic flags
+assert BASIC_FLAG_SIZE&7 == 0, "ValueError"
+
+
+class FeatureFlags:
+    __slots__ = "flag_names"
+
+    ENV_IS_LIST = 1
+    CLEAR_AFTER_USE = 2
+    EXTENDED = BASIC_FLAG_SIZE
+    ALL_FLAGS = {"ENV_IS_LIST":ENV_IS_LIST,
+                 "CLEAR_AFTER_USE":CLEAR_AFTER_USE,
+                 "EXTENDED":EXTENDED}
+
+    def __init__(self):
+        self.clear()
+
+    def clear(self):
+        self.flag_names = {}
+
+    def is_set(self, flag_name):
+        assert isinstance(flag_name, bytes2)
+        assert flag_name in FeatureFlags.ALL_FLAGS, "Unknown flag"
+        return flag_name in self.flag_names
+
+    def set(self, flag_name):
+        assert isinstance(flag_name, bytes2)
+        assert flag_name in FeatureFlags.ALL_FLAGS, "Unknown flag"
+        self.flag_names[flag_name] = None
+
+    def serialise(self):
+        output = 0
+        for flag_name in self.flag_names:
+            assert flag_name in FeatureFlags.ALL_FLAGS, "Unknown flag"
+            flag = FeatureFlags.ALL_FLAGS[flag_name]
+            assert 0 < flag <= BASIC_FLAG_SIZE, "ValueError"
+            output |= 1<<(flag-1)
+        return serialise_int(output, BASIC_FLAG_SIZE>>3)
+
+    def derialise(self, serialised_flags):
+        assert isinstance(serialised_flags, int), "TypeError"
+        assert 0 <= serialised_flags < 1<<FeatureFlags.EXTENDED, "ValueError"
+        if serialised_flags & (1<<(FeatureFlags.EXTENDED-1)):
+            raise NotImplementedError("Extended flags not implemented")
+        self.clear()
+        for flag_name, flag in FeatureFlags.ALL_FLAGS.items():
+            if serialised_flags & (1<<(flag-1)):
+                self.set(flag_name)
+
+    def issame(self, other):
+        assert isinstance(other, FeatureFlags)
+        return list(self.flag_names) == list(other.flag_names)
+
+    def __repr__(self):
+        output = "Flags["
+        for i, flag_name in enumerate(self.flag_names):
+            output += flag_name
+            if i != len(self.flag_names)-1:
+                output += ", "
+        return output + "]"
+
 
 def derialise(data):
     version, data = derialise_int(data, VERSION_SIZE)
+    raw_flags, data = derialise_int(data, BASIC_FLAG_SIZE>>3)
     frame_size, data = derialise_int(data, FRAME_SIZE)
+    env_size, data = derialise_int(data, ENV_SIZE_SIZE)
     output = []
     while data:
         ast_t_id, _ = derialise_ast_t_id(data)
         bast, data = TABLE[ast_t_id](data)
         assert isinstance(bast, Bast), "Impossible"
         output.append(bast)
-    return frame_size, output
+    flags = FeatureFlags()
+    flags.derialise(raw_flags)
+    return flags, frame_size, env_size, output
 
 
 """
@@ -393,3 +522,12 @@ Special:
 Not implemented:
     Calling `idx=` with args=(array, start, stop, step, value)
 """
+
+BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or", "len", "idx", "simple_idx", "simple_idx=", "[]"]
+BUILTIN_SIDES = ["print", "append"]
+BUILTIN_HELPERS = ["$prev_env"]
+
+BUILTIN_OPS = list(map(str, BUILTIN_OPS))
+BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))
+BUILTIN_HELPERS = list(map(str, BUILTIN_HELPERS))
+BUILTINS = BUILTIN_HELPERS + BUILTIN_OPS + BUILTIN_SIDES

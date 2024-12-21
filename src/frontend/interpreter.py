@@ -44,12 +44,17 @@ class StrValue(Value):
 
 
 class FuncValue(Value):
-    _immutable_fields_ = ["tp", "master"]
-    __slots__ = "tp", "master"
+    _immutable_fields_ = ["tp", "master", "env_size"]
+    __slots__ = "tp", "master", "env_size"
 
-    def __init__(self, tp, master):
-        assert isinstance(master, Dict), "TypeError"
+    def __init__(self, tp, master, env_size):
+        assert isinstance(env_size, int), "TypeError"
+        if ENV_IS_LIST:
+            assert isinstance(master, list), "TypeError"
+        else:
+            assert isinstance(master, Dict), "TypeError"
         assert isinstance(tp, int), "TypeError"
+        self.env_size = env_size
         self.master = master
         self.tp = tp
 
@@ -102,15 +107,6 @@ class ListValue(Value):
         return u"array[size=" + int_to_str(self.len()) + u"]"
 
 
-class NoneValue(Value):
-    __slots__ = ()
-    _immutable_fields_ = []
-
-    def __repr__(self):
-        return u"none"
-
-
-NONE = const(NoneValue())
 ZERO = const(IntValue(0))
 ONE = const(IntValue(1))
 FALSE = const(BoolValue(0))
@@ -120,6 +116,8 @@ TRUE = const(BoolValue(1))
 @look_inside
 @elidable
 def get_type(value):
+    if value is None:
+        return u"none"
     if isinstance(value, IntValue):
         return u"int"
     if isinstance(value, StrValue):
@@ -130,35 +128,23 @@ def get_type(value):
         return u"list"
     if isinstance(value, FuncValue):
         return u"func"
-    if value == NONE:
-        return u"none"
     return u"unknown"
 
 @look_inside
 @elidable
 def force_bool(val):
-    assert isinstance(val, Value), "TypeError"
-    assert not isinstance(val, LinkValue), "InternalError"
+    if val is None:
+        return False
     if isinstance(val, IntValue):
         return bool(val.value)
-    elif isinstance(val, StrValue):
+    if isinstance(val, StrValue):
         return bool(val.value)
-    elif isinstance(val, ListValue):
+    if isinstance(val, ListValue):
         return bool(val.len())
-    elif val == NONE:
-        return False
+    if isinstance(val, LinkValue):
+        assert False, "InternalError: LinkValue in Regs"
     return True
 
-
-BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or", "len", "idx", "simple_idx", "simple_idx=", "[]"]
-BUILTIN_SIDES = ["print", "append"]
-BUILTIN_OPS = list(map(str, BUILTIN_OPS))
-BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))
-
-@look_inside
-@elidable
-def new_regs(frame_size):
-    return [ZERO, ONE] + [NONE]*(const(frame_size))
 
 @look_inside
 @elidable
@@ -181,62 +167,79 @@ def bytecode_debug_str(pc, bt):
 
 
 if USE_JIT:
-    def get_location(pc, bytecode, _=None):
+    def get_location(pc, bytecode, *_):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
-    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["stack","env","regs"], get_printable_location=get_location)
+    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","stack","env","regs"], get_printable_location=get_location)
 
 
-class Interpreter:
-    __slots__ = "bytecode", "frame_size"
+def interpret(flags, frame_size, env_size, bytecode):
+    if ENV_IS_LIST != flags.is_set("ENV_IS_LIST"):
+        if ENV_IS_LIST:
+            print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST but the clizz file wasn't\x1b[0m")
+        else:
+            print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST==false but the clizz file uses ENV_IS_LIST\x1b[0m")
+        raise SystemExit()
+    # Create teleports
+    teleports = Dict()
+    for i, bt in enumerate(bytecode):
+        if isinstance(bt, Bable):
+            teleports[const(const_str(bt.id))] = const(IntValue(const(i)))
+    for i, op in enumerate(BUILTINS):
+        tp = len(bytecode) + i
+        teleports[const(const_str(int_to_str(tp)))] = const(IntValue(tp))
+    # Create regs
+    regs = [None]*(frame_size+2)
+    # Create env
+    if ENV_IS_LIST:
+        env = [None]*env_size
+        for i, op in enumerate(BUILTINS):
+            assert isinstance(op, str), "TypeError"
+            env[i] = FuncValue(i+len(bytecode), env, 0)
+    else:
+        env = Dict()
+        for i, op in enumerate(BUILTINS):
+            assert isinstance(op, str), "TypeError"
+            env[op] = FuncValue(i+len(bytecode), env, 0)
+    # Start actual interpreter
+    _interpret(bytecode, teleports, regs, env, flags)
 
-    def __init__(self, frame_size, bytecode):
-        assert isinstance(frame_size, int), "TypeError"
-        assert isinstance(bytecode, list), "TypeError"
-        assert frame_size >= 0, "ValueError"
-        self.frame_size = frame_size
-        self.bytecode = bytecode
 
-    def interpret(self):
-        teleports = Dict()
-        for i, bt in enumerate(self.bytecode):
-            if isinstance(bt, Bable):
-                teleports[const(const_str(bt.id))] = const(IntValue(const(i)))
-        for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
-            tp = len(self.bytecode) + i
-            teleports[const(const_str(int_to_str(tp)))] = const(IntValue(tp))
-        regs = [NONE]*(self.frame_size+2)
-        _interpret(self.bytecode, teleports, regs)
+ENV_IS_LIST = True
+if ENV_IS_LIST:
+    PREV_ENV = 0
+else:
+    PREV_ENV = u"$prev_env"
 
+def _interpret(bytecode, teleports, regs, env, flags):
+    CLEAR_AFTER_USE = const(flags.is_set("CLEAR_AFTER_USE"))
 
-def _interpret(bytecode, teleports, regs):
     bytecode = [const(bt) for bt in bytecode]
     pc = 0 # current instruction being executed
     stack = [] # list[tuple[Env,Regs,Pc,RetReg]]
-    env = Dict()
-    for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
-        assert isinstance(op, str), "TypeError"
-        env[op] = FuncValue(i+len(bytecode), env)
 
     while pc < len(bytecode):
         if USE_JIT:
-            jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
+            jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
-            debug(bytecode_debug_str(pc, bt), 3)
+            debug(str(bytecode_debug_str(pc, bt)), 3)
         pc += 1
 
         if isinstance(bt, Bable):
-            if USE_JIT:
-                jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc-1, bytecode=bytecode, teleports=teleports)
+            pass
+
         elif isinstance(bt, BLoadLink):
+            assert not ENV_IS_LIST, "Invalid flag/bytecode"
             env[bt.name] = LinkValue(bt.link)
-        elif isinstance(bt, BStoreLoad):
-            scope, value = env, env.get(bt.name, None)
+
+        elif isinstance(bt, BStoreLoadDictEnv):
+            assert not ENV_IS_LIST, "Invalid flag/bytecode"
             # Get the correct scope
+            scope, value = env, env.get(bt.name, None)
             if isinstance(value, LinkValue):
                 for i in range(value.link):
-                    scope_holder = scope.get(u"$prev_env", None)
+                    scope_holder = scope.get(PREV_ENV, None)
                     assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
                     scope = scope_holder.master
                 if not bt.storing:
@@ -248,30 +251,45 @@ def _interpret(bytecode, teleports, regs):
                 if value is None:
                     raise_name_error(bt.name)
                 regs[bt.reg] = value
+
+        elif isinstance(bt, BStoreLoadListEnv):
+            assert ENV_IS_LIST, "Invalid flag/bytecode"
+            # Get the correct scope
+            scope = env
+            for i in range(bt.link):
+                scope_holder = scope[PREV_ENV]
+                assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
+                scope = scope_holder.master
+            # Store/Load variable
+            if bt.storing:
+                scope[bt.name] = reg_index(regs, bt.reg)
+            else:
+                regs[bt.reg] = scope[bt.name]
+
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
             if bt.type == BLiteral.INT_T:
                 assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                literal = IntValue(bt_literal.int_value)
+                literal = IntValue(bt_literal.value)
             elif bt.type == BLiteral.FUNC_T:
-                assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                literal = FuncValue(bt_literal.int_value, env)
+                assert isinstance(bt_literal, BLiteralFunc), "TypeError"
+                literal = FuncValue(bt_literal.value, env, bt_literal.env_size)
             elif bt.type == BLiteral.STR_T:
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
-                literal = StrValue(bt_literal.str_value)
+                literal = StrValue(bt_literal.value)
             elif bt.type == BLiteral.NONE_T:
-                literal = NONE
+                literal = None
             elif bt.type == BLiteral.LIST_T:
                 literal = ListValue()
             else:
                 raise NotImplementedError()
             regs[bt.reg] = literal
             del literal, bt_literal
+
         elif isinstance(bt, BJump):
-            # WARNING: Bjump always clears condition reg!!!
             value = reg_index(regs, bt.condition_reg)
-            if bt.condition_reg > 1:
-                regs[bt.condition_reg] = NONE
+            if CLEAR_AFTER_USE and (bt.condition_reg > 1):
+                regs[bt.condition_reg] = None
             condition = force_bool(value)
             # if condition != bt.negated: # RPython's JIT can't constant fold bt.negated in this form :/
             if (condition and (not bt.negated)) or ((not condition) and bt.negated):
@@ -279,8 +297,11 @@ def _interpret(bytecode, teleports, regs):
                 assert isinstance(tp, IntValue), "TypeError"
                 pc = tp.value
                 assert isinstance(bytecode[pc], Bable), "InternalError"
+                if USE_JIT:
+                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
                 del tp
             del value
+
         elif isinstance(bt, BRegMove):
             if bt.reg1 == 2:
                 ret_val = reg_index(regs, bt.reg2)
@@ -294,6 +315,7 @@ def _interpret(bytecode, teleports, regs):
                 del ret_val
             else:
                 regs[bt.reg1] = reg_index(regs, bt.reg2)
+
         elif isinstance(bt, BCall):
             func = const(reg_index(regs, bt.regs[1]))
             if not isinstance(func, FuncValue):
@@ -309,14 +331,19 @@ def _interpret(bytecode, teleports, regs):
                 stack.append((env,regs,old_pc,bt.regs[0]))
                 old_regs, regs = regs, list(regs)
                 assert len(old_regs) == len(regs), "InternalError"
-                env = func.master.copy()
-                env[u"$prev_env"] = func
+                if ENV_IS_LIST:
+                    env = [None]*func.env_size
+                else:
+                    env = func.master.copy()
+                env[PREV_ENV] = func
                 for i in range(2, len(bt.regs)):
                     regs[i+1] = old_regs[bt.regs[i]]
                 assert isinstance(bytecode[pc], Bable), "InternalError"
+                if USE_JIT:
+                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
                 del old_regs
             else: # Built-ins
-                op_idx = tp_value - len(bytecode)
+                op_idx = tp_value - len(bytecode) - 1
                 pure_op = op_idx < len(BUILTIN_OPS)
                 if pure_op:
                     op = BUILTIN_OPS[op_idx]
@@ -413,17 +440,17 @@ def builtin_pure_list(op, args, op_print):
         if not isinstance(arg0, ListValue):
             raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
         length = arg0.len()
-        if isinstance(arg3, NoneValue): # step
+        if arg3 is None: # step
             step = 1
         elif isinstance(arg3, IntValue):
             step = arg3.value
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the step arg")
-            return NONE
+            return None
         if step == 0:
             raise_type_error(op_print + u" doesn't support 0 for the step arg")
-            return NONE
-        if isinstance(arg1, NoneValue): # start
+            return None
+        if arg1 is None: # start
             start = 0 if step > 0 else length
         elif isinstance(arg1, IntValue):
             start = arg1.value
@@ -431,8 +458,8 @@ def builtin_pure_list(op, args, op_print):
                 start += length
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
-            return NONE
-        if isinstance(arg2, NoneValue): # stop
+            return None
+        if arg2 is None: # stop
             stop = -1 if step < 0 else length
         elif isinstance(arg2, IntValue):
             stop = arg2.value
@@ -440,7 +467,7 @@ def builtin_pure_list(op, args, op_print):
                 stop += length
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
-            return NONE
+            return None
         new = ListValue()
         for idx in range(start, stop, step):
             if 0 <= idx < length:
@@ -478,7 +505,7 @@ def builtin_pure_list(op, args, op_print):
         if not (0 <= idx < length):
             raise_index_error(u"when setting idx=" + int_to_str(idx))
         arg0.index_set(idx, arg2)
-        return NONE
+        return None
 
     elif op == u"[]":
         new = ListValue()
@@ -661,14 +688,14 @@ def builtin_pure_nonlist(op, args, op_print):
 @look_inside
 @elidable
 def inner_repr(obj):
-    if isinstance(obj, IntValue):
+    if obj is None:
+        return u"none"
+    elif isinstance(obj, IntValue):
         return int_to_str(obj.value)
     elif isinstance(obj, StrValue):
         return obj.value[1:]
     elif isinstance(obj, FuncValue):
         return u"Func"
-    elif isinstance(obj, NoneValue):
-        return u"none"
     elif isinstance(obj, ListValue):
         string = u"["
         for i, element in enumerate(obj.array):
@@ -688,7 +715,7 @@ def builtin_side(op, args):
             if i != len(args)-1:
                 string += u" "
         print(u"[STDOUT]: " + string)
-        return NONE
+        return None
     elif op == u"append":
         if len(args) != 2:
             raise_type_error(op + u" expected 2 arguments")
@@ -696,7 +723,7 @@ def builtin_side(op, args):
         if not isinstance(arg0, ListValue):
             raise_type_error(op + u" expected a list as its 1st argument")
         arg0.append(arg1)
-        return NONE
+        return None
     raise_unreachable_error(u"Builtin " + op + u" not implemented")
     assert False, "Unreachable"
 
@@ -724,11 +751,10 @@ def raise_error():
 def _main(raw_bytecode):
     assert isinstance(raw_bytecode, bytes), "TypeError"
     debug(u"Derialising bytecode...", 2)
-    data = derialise(raw_bytecode)
-    debug(u"Creatng interpreter...", 2)
-    interpreter = Interpreter(*data)
+    flags, frame_size, env_size, bytecode = derialise(raw_bytecode)
+    debug(u"Parsing flags...", 2)
     debug(u"Starting interpreter...", 1)
-    interpreter.interpret()
+    interpret(flags, frame_size, env_size, bytecode)
 
 def main(filepath):
     debug(u"Reading file...", 2)
@@ -747,3 +773,4 @@ if __name__ == "__main__":
 # https://web.archive.org/web/20170929153251/https://bitbucket.org/brownan/pypy-tutorial/src/tip/example4.py
 # https://doi.org/10.1016/j.entcs.2016.12.012
 # /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/rlib/jit.py
+# https://eprints.gla.ac.uk/113615/

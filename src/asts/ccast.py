@@ -352,18 +352,8 @@ def get_first_token(node:Cmd|Expr|MatchCase) -> Token:
         return node.ft
     raise NotImplemented("TODO")
 
-def raise_error_token(msg:str, token:Token, error:Exception) -> None:
-    assert isinstance(error, Exception), "TypeError"
-    assert isinstance(token, Token), "TypeError"
-    assert isinstance(msg, str), "TypeError"
-    try:
-        token.stamp.throw(msg)
-    except SyntaxError as err:
-        error.msg:str = err.msg
-        raise error
-
 
 Macro:type = Func
-Cmd:type = Expr|Assign|If|While|For|ReturnYield|BreakContinue|Raise|NonLocal| \
-           Match|With
+Branch:type = If|While|For|Match|With
+Cmd:type = Expr|Assign|Branch|ReturnYield|BreakContinue|Raise|NonLocal|Macro
 Body:type = list[Cmd]

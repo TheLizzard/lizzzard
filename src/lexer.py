@@ -62,6 +62,12 @@ class Token:
         else:
             return self.token
 
+    def throw(self, msg:str) -> None:
+        self.stamp.throw(msg)
+
+    def double_throw(self, msg:str, other:Token) -> None:
+        self.stamp.double_throw(msg, other.stamp)
+
 
 class Stamp:
     __slots__ = "line", "char", "line_string"
@@ -75,13 +81,24 @@ class Stamp:
         self.line:int = line
 
     def throw(self, msg:str) -> None:
-        new_msg:str = msg + f" on line {self.line} character {self.char}\n"
-        new_msg += self.line_string
-        new_msg += " "*self.char + "^"
+        self._throw(self._get_err_msg(msg))
+
+    def double_throw(self, msg:str, other:Stamp) -> None:
+        new_msg:str = "\n" + self._get_err_msg("On")
+        new_msg += "\n" + other._get_err_msg(msg)
+        self._throw(new_msg)
+
+    def _get_err_msg(self, msg:str) -> str:
+        msg += f" [line {self.line} character {self.char}]\n"
+        msg += self.line_string
+        msg += " "*self.char + "^"
+        return msg
+
+    def _throw(self, msg:str) -> None:
         if DEBUG_THROW:
-            raise SyntaxError(new_msg)
+            raise SyntaxError(msg)
         else:
-            raise FinishedWithError(new_msg) from None
+            raise FinishedWithError(msg) from None
 
 
 class FinishedWithError(SyntaxError): ...
