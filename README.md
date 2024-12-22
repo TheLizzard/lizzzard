@@ -23,7 +23,7 @@ Functional language with rpython's tracing JIT compiler
 | With           |     ✔ |      ✔ |     |                   |     |             |
 | Exceptions     |     ✔ |      ✔ |     |                   |     |             |
 | Comprehension  |     ✔ |        |     |                   |   - |           - |
-| Partial funcs  |     ✔ |      ✔ |     |                   |   - |           - |
+| Partial funcs  |     ✔ |      ✔ |   - |                   |   - |           - |
 
 
 | Type     | Lexer | Parser | IR | Interpreter |
@@ -41,7 +41,6 @@ Functional language with rpython's tracing JIT compiler
 # Missing from interpreter
 * classes/records (still thinking about the object model)
 * match/case (requires records)
-* partial func syntax desugaring (needs to be implemented in the parser/bytecoder)
 * destructuring assignment (requires object model)
 * booleans (instead of reusing `IntValue`)
 * for loops (requires object model)

@@ -241,6 +241,23 @@ Op(call Var[print], Var[x])
 """
 
 
+TEST_PARTIAL:str = """
+id = /?/
+create_odd = /2 * ? + 1/
+partial = /f(?, 5)/
+
+add = /? + ?/
+if x -> /?/
+"""
+RESULT_PARTIAL:str = """
+Var[id] = ([Var[£0]] => [Return(Var[£0])])
+Var[create_odd] = ([Var[£0]] => [Return(Op(+ Op(* Literal[2], Var[£0]), Literal[1]))])
+Var[partial] = ([Var[£0]] => [Return(Op(call Var[f], Var[£0], Literal[5]))])
+Var[add] = ([Var[£0], Var[£1]] => [Return(Op(+ Var[£0], Var[£1]))])
+If(Var[x])[([Var[£0]] => [Return(Var[£0])])][]
+"""
+
+
 TEST_WITH:str = """
 with open(r"/path/to/file.ext", "r") as file ->
     print(0)
@@ -353,10 +370,10 @@ if __name__ == "__main__":
     # lexer.DEBUG_THROW:bool = True
     codes = (TEST_LITERAL_PRINT, TEST_EXPR, TEST_IF, TEST_WHILE,
              TEST_FUNC, TEST_WITH, TEST_GENERATOR, TEST_CLASS,
-             TEST_MULTI_ASSIGN, TEST_IDX)
+             TEST_MULTI_ASSIGN, TEST_IDX, TEST_PARTIAL)
     expecteds = (RESULT_LITERAL_PRINT, RESULT_EXPR, RESULT_IF, RESULT_WHILE,
                  RESULT_FUNC, RESULT_WITH, RESULT_GENERATOR, RESULT_CLASS,
-                 RESULT_MULTI_ASSIGN, RESULT_IDX)
+                 RESULT_MULTI_ASSIGN, RESULT_IDX, RESULT_PARTIAL)
     # codes = ()
     for code, expected in zip(codes, expecteds):
         ast:Body = Parser(lexer.Tokeniser(StringIO(code))).read()
@@ -371,6 +388,7 @@ if __name__ == "__main__":
             expected:str = re.sub("\n#[^\n]*\n", "\n", expected)
         if result != expected:
             raise RuntimeError("Test failed: ast not correct")
+    print("\x1b[92m[TEST]: All tests passed\x1b[0m")
 
 
 if __name__ == "__main__":
@@ -385,11 +403,8 @@ match 11 ->
         5
     case Int(?x) ->
         10
-    case ? ->
+    case ?_ ->
         15
-id = ?
-odd = 2 * ? + 1
-partial = f(?:Int, 5:Int):List[Int]
 """.removeprefix("\n").removesuffix("\n")
     t = lexer.Tokeniser(StringIO(TEST))
     p:Parser = Parser(t)

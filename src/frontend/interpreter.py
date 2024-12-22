@@ -44,18 +44,20 @@ class StrValue(Value):
 
 
 class FuncValue(Value):
-    _immutable_fields_ = ["tp", "master", "env_size"]
-    __slots__ = "tp", "master", "env_size"
+    _immutable_fields_ = ["tp", "master", "env_size", "nargs"]
+    __slots__ = "tp", "master", "env_size", "nargs"
 
-    def __init__(self, tp, master, env_size):
+    def __init__(self, tp, master, env_size, nargs):
         assert isinstance(env_size, int), "TypeError"
         if ENV_IS_LIST:
             assert isinstance(master, list), "TypeError"
         else:
             assert isinstance(master, Dict), "TypeError"
+        assert isinstance(nargs, int), "TypeError"
         assert isinstance(tp, int), "TypeError"
         self.env_size = env_size
         self.master = master
+        self.nargs = nargs
         self.tp = tp
 
     def __repr__(self):
@@ -195,12 +197,12 @@ def interpret(flags, frame_size, env_size, bytecode):
         env = [None]*env_size
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
-            env[i] = FuncValue(i+len(bytecode), env, 0)
+            env[i] = FuncValue(i+len(bytecode), env, 0, 0)
     else:
         env = Dict()
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
-            env[op] = FuncValue(i+len(bytecode), env, 0)
+            env[op] = FuncValue(i+len(bytecode), env, 0, 0)
     # Start actual interpreter
     _interpret(bytecode, teleports, regs, env, flags)
 
@@ -273,7 +275,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 literal = IntValue(bt_literal.value)
             elif bt.type == BLiteral.FUNC_T:
                 assert isinstance(bt_literal, BLiteralFunc), "TypeError"
-                literal = FuncValue(bt_literal.value, env, bt_literal.env_size)
+                literal = FuncValue(bt_literal.value, env, bt_literal.env_size, bt_literal.nargs)
             elif bt.type == BLiteral.STR_T:
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
                 literal = StrValue(bt_literal.value)
@@ -284,7 +286,6 @@ def _interpret(bytecode, teleports, regs, env, flags):
             else:
                 raise NotImplementedError()
             regs[bt.reg] = literal
-            del literal, bt_literal
 
         elif isinstance(bt, BJump):
             value = reg_index(regs, bt.condition_reg)
@@ -299,8 +300,6 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 assert isinstance(bytecode[pc], Bable), "InternalError"
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
-                del tp
-            del value
 
         elif isinstance(bt, BRegMove):
             if bt.reg1 == 2:
@@ -312,7 +311,6 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     break
                 env, regs, pc, res_reg = stack.pop()
                 regs[res_reg] = ret_val
-                del ret_val
             else:
                 regs[bt.reg1] = reg_index(regs, bt.reg2)
 
@@ -327,21 +325,25 @@ def _interpret(bytecode, teleports, regs, env, flags):
             assert isinstance(tp, IntValue), "TypeError"
             tp_value = const(tp.value)
             if tp_value < len(bytecode):
-                pc, old_pc = tp_value, pc
-                stack.append((env,regs,old_pc,bt.regs[0]))
-                old_regs, regs = regs, list(regs)
-                assert len(old_regs) == len(regs), "InternalError"
+                stack.append((env,regs,pc,bt.regs[0]))
+                # Set the pc/regs/env
+                pc, old_regs, regs = tp_value, regs, list(regs)
                 if ENV_IS_LIST:
                     env = [None]*func.env_size
                 else:
                     env = func.master.copy()
                 env[PREV_ENV] = func
+                # Check number of args
+                if len(bt.regs)-2 > func.nargs:
+                    raise_type_error(u"too many arguments")
+                elif len(bt.regs)-2 < func.nargs:
+                    raise_type_error(u"too few arguments")
+                # Copy arguments values into new regs
                 for i in range(2, len(bt.regs)):
                     regs[i+1] = old_regs[bt.regs[i]]
-                assert isinstance(bytecode[pc], Bable), "InternalError"
+                # Tell the JIT compiler about the jump
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
-                del old_regs
             else: # Built-ins
                 op_idx = tp_value - len(bytecode) - 1
                 pure_op = op_idx < len(BUILTIN_OPS)
@@ -356,9 +358,6 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     value = builtin_side(op, args)
                 if bt.regs[0] > 1: # Don't store values inside ZERO,ONE
                     regs[bt.regs[0]] = value
-                del args, pure_op, op_idx, op, value
-            del tp, tp_value, func
-        del bt
 
 
 @look_inside

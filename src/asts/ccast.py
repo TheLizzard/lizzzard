@@ -165,7 +165,7 @@ class For:
         assert islist(body, Cmd|Expr), "TypeError"
         assert isinstance(exp, Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
-        self.identifier:Token = identifier
+        self.identifier:Assignable = identifier
         self.nobreak:Body = nobreak
         self.body:Body = body
         self.exp:Expr = exp

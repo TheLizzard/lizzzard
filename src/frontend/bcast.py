@@ -199,13 +199,15 @@ class BLiteralStr(BLiteralHolder):
         assert isinstance(value, str), "TypeError"
         self.value = const(const_str(value))
 class BLiteralFunc(BLiteralHolder):
-    _immutable_fields_ = ["env_size", "value"]
-    __slots__ = "env_size", "value"
-    def __init__(self, env_size, value):
+    _immutable_fields_ = ["env_size", "value", "nargs"]
+    __slots__ = "env_size", "value", "nargs"
+    def __init__(self, env_size, value, nargs):
         assert isinstance(env_size, int), "TypeError"
         assert isinstance(value, int), "TypeError"
+        assert isinstance(nargs, int), "TypeError"
         self.env_size = const(env_size)
         self.value = const(value)
+        self.nargs = const(nargs)
 class BLiteralEmpty(BLiteralHolder):
     _immutable_fields_ = []
     __slots__ = ()
@@ -240,6 +242,7 @@ class BLiteral(Bast):
             assert isinstance(self.literal, BLiteralFunc), "TypeError"
             literal = serialise_int(self.literal.env_size, ENV_SIZE_SIZE)
             literal += serialise_int(self.literal.value, FUNC_ID_SIZE)
+            literal += serialise_int(self.literal.nargs, REG_SIZE)
         elif self.type == BLiteral.STR_T:
             assert isinstance(self.literal, BLiteralStr), "TypeError"
             literal = serialise_str(self.literal.value, STR_LITERAL_SIZE)
@@ -262,7 +265,8 @@ class BLiteral(Bast):
         elif type in (BLiteral.PROC_T, BLiteral.FUNC_T):
             env_size, data = derialise_int(data, ENV_SIZE_SIZE)
             raw_literal, data = derialise_int(data, FUNC_ID_SIZE)
-            literal = BLiteralFunc(env_size, raw_literal)
+            raw_nargs, data = derialise_int(data, REG_SIZE)
+            literal = BLiteralFunc(env_size, raw_literal, raw_nargs)
         elif type == BLiteral.STR_T:
             raw_literal, data = derialise_str(data, STR_LITERAL_SIZE)
             literal = BLiteralStr(raw_literal)
@@ -403,7 +407,8 @@ def bytecode_list_to_str(bytecodes, mini=False):
                     t = u"proc"
                 assert isinstance(bt_literal, BLiteralFunc), "TypeError"
                 literal = t + u"[" + int_to_str(bt_literal.value) + u", " + \
-                          u"env_size=" + int_to_str(bt_literal.env_size) + u"]"
+                          u"env_size=" + int_to_str(bt_literal.env_size) + \
+                          u",nargs=" + int_to_str(bt_literal.nargs) + u"]"
             elif bt.type == BLiteral.NONE_T:
                     literal = u"none"
             elif bt.type == BLiteral.LIST_T:
@@ -523,7 +528,8 @@ Not implemented:
     Calling `idx=` with args=(array, start, stop, step, value)
 """
 
-BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or", "len", "idx", "simple_idx", "simple_idx=", "[]"]
+BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=",
+               "or", "len", "idx", "simple_idx", "simple_idx=", "[]"]
 BUILTIN_SIDES = ["print", "append"]
 BUILTIN_HELPERS = ["$prev_env"]
 

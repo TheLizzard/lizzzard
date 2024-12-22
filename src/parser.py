@@ -70,7 +70,9 @@ class Parser:
     # Read file/block/line
     def read(self) -> Body|None:
         try:
-            return self._read_block(indented=False)
+            ast:Body = self._read_block(indented=False)
+            assert_partials(ast)
+            return ast
         except FinishedWithError as error:
             print(f"\x1b[91mSyntaxError: {error.msg}\x1b[0m", file=stderr)
 
@@ -181,8 +183,7 @@ class Parser:
             self._assert_read("for")
             identifier:Assignable = self._read_expr()
             self._assert_check_assignable(identifier)
-            self._assert_read("in", 'Expected "in" after ' \
-                                    '"for <identifier>"')
+            self._assert_read("in", 'Expected "in" token here')
             exp:Expr = self._read_expr()
             body:Body = self._read_line__colon_block()
             if self._try_read_after_newlines("else"):
@@ -387,6 +388,10 @@ class Parser:
                 op:Token = self.tokeniser.peek()
                 if op not in operators:
                     break
+                # Special case for partial functions /1 + ?/
+                # The second "/" shouldn't match the "/" in EXPR_PRECEDENCE
+                if (op == "/") and (self.tokeniser.peek_n(2)[1] in NOT_EXPR):
+                    break
                 self._assert_read(op.token)
                 exp2:Expr = self._read_expr(precedence+1, notype=notype,
                                             istype=istype)
@@ -514,6 +519,16 @@ class Parser:
         # identifier
         elif token.isidentifier():
             exp:Expr = self._read_identifier()
+        # \<partial function>\
+        elif token == "/":
+            self._assert_read("/")
+            exp:Expr = self._read_expr()
+            self._assert_read("/", "expected / after expression")
+            args:list[Var] = []
+            exp:Expr = _replace_partial_qs_exp(exp, args)
+            _reset_q_next_num()
+            ret:ReturnYield = ReturnYield(token, exp, isreturn=True)
+            exp:Func = Func(token, args, [ret], None, functional=False)
         # (5,10) or (5+5)
         elif token == "(":
             with self.tokeniser.freeze_indentation:
@@ -563,6 +578,11 @@ class Parser:
         if token in KEYWORDS:
             self.tokeniser.throw(f"{token=!r} in KEYWORDS but parsed as " \
                                  f"identifier")
+        return Var(token)
+
+    def _read_qmarked(self, token:Token) -> Var:
+        assert token.isqmarked(), "InternalError"
+        self._assert_read(token.token)
         return Var(token)
 
     def _read_class_record_def(self) -> Expr:
@@ -677,6 +697,116 @@ class Parser:
                 self._assert_read(",")
             self._assert_read(end, f"Expected {end} or comma")
         return args
+
+
+def assert_partials(body:Body) -> Body:
+    for i, cmd in enumerate(body):
+        if isinstance(cmd, Assign):
+            for target in cmd.targets:
+                _assert_partials_exp(target)
+            cmd.value:Expr = _assert_partials_exp(cmd.value)
+        elif isinstance(cmd, If):
+            _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.true)
+            assert_partials(cmd.false)
+        elif isinstance(cmd, While):
+            _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.true)
+        elif isinstance(cmd, For):
+            _assert_partials_exp(cmd.identifier)
+            _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.body)
+            assert_partials(cmd.nobreak)
+        elif isinstance(cmd, With):
+            if cmd.identifier is not None:
+                _assert_partials_exp(cmd.identifier)
+            if cmd.exp is not None:
+                _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.code)
+            assert_partials(cmd.fin)
+            assert_partials(cmd.noerror)
+            for vars, assignable, cmds in cmd.catch:
+                if assignable is not None:
+                    _assert_partials_exp(assignable)
+                assert_partials(cmds)
+                for var in vars:
+                    token:Token = var.identifier
+                    if token.token.startswith("?"):
+                        token.throw("?var outside of match/case statement")
+        elif isinstance(cmd, ReturnYield|Raise):
+            if cmd.exp is not None:
+                cmd.exp:Expr = _assert_partials_exp(cmd.exp)
+        elif isinstance(cmd, NonLocal|BreakContinue):
+            pass
+        elif isinstance(cmd, MatchCase):
+            cmd.ft.throw("match case outside of match statement")
+        elif isinstance(cmd, Match):
+            for case in cmd.cases:
+                assert_partials(case.body)
+                _assert_partials_exp(case.exp, allow_qs=True)
+        elif isinstance(cmd, Expr):
+            _assert_partials_exp(cmd)
+        else:
+            raise NotImplementedError("TODO: Missed a case here")
+
+def _assert_partials_exp(exp:Expr, allow_qs:bool=False) -> None:
+    if isinstance(exp, Func):
+        for arg in exp.args:
+            _assert_partials_exp(arg)
+        assert_partials(exp.body)
+    elif isinstance(exp, DictPair):
+        exp.exp1:Expr = _assert_partials_exp(exp.exp1, allow_qs=allow_qs)
+        exp.exp2:Expr = _assert_partials_exp(exp.exp2, allow_qs=allow_qs)
+    elif isinstance(exp, Class):
+        for base in exp.bases:
+            _assert_partials_exp(base)
+        assert_partials(exp.attributes)
+    elif isinstance(exp, Var):
+        token:Token = exp.identifier
+        if token == "?":
+            token.throw("? outside of partial functions is forbidden")
+        if token.token.startswith("?") and (not allow_qs):
+            token.throw("?car outside of match/case statements is forbidden")
+    elif isinstance(exp, Literal):
+        pass
+    elif isinstance(exp, Op):
+        for i, arg in enumerate(exp.args):
+            exp.args[i] = _assert_partials_exp(arg, allow_qs=allow_qs)
+    else:
+        raise NotImplementedError("TODO: Missed a case here")
+    return exp
+
+def _replace_partial_qs_exp(exp:Expr, args:list[Var]) -> Expr:
+    if isinstance(exp, Func):
+        _replace_partial_qs(exp.body, args)
+    elif isinstance(exp, DictPair):
+        exp.exp1:Expr = _replace_partial_qs(exp.exp1, args)
+        exp.exp2:Expr = _replace_partial_qs(exp.exp2, args)
+    elif isinstance(exp, Class):
+        _replace_partial_qs(exp.attributes)
+    elif isinstance(exp, Var):
+        token:Token = exp.identifier
+        if token == "?":
+            new_name:str = f"£{_get_q_next_num()}"
+            exp.identifier:Token = token.name_as(new_name)
+            args.append(exp)
+    elif isinstance(exp, Literal):
+        pass
+    elif isinstance(exp, Op):
+        for i, arg in enumerate(exp.args):
+            exp.args[i] = _replace_partial_qs_exp(arg, args)
+    else:
+        raise NotImplementedError("TODO: Missed a case here")
+    return exp
+
+_q_num:int = 0
+def _get_q_next_num() -> int:
+    global _q_num
+    current, _q_num = _q_num, _q_num+1
+    return current
+def _reset_q_next_num() -> None:
+    global _q_num
+    _q_num = 0
 
 
 EXPR_PRECEDENCE = [

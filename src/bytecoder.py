@@ -444,7 +444,7 @@ class ByteCoder:
             # <INSTRUCTIONS>:
             #   res_reg := func_label
             res_reg:int = state.get_free_reg()
-            func_literal:BLiteralFunc = BLiteralFunc(0, func_id)
+            func_literal:BLiteralFunc = BLiteralFunc(0, func_id, len(cmd.args))
             state.append_bast(BLiteral(res_reg, func_literal, BLiteral.FUNC_T))
             def todo() -> None:
                 # <NEW BODY>:
@@ -612,6 +612,12 @@ f = x[::-1]
 print("\t", len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4, b[2]==5,
       len(c)==1, c[0]==2, len(d)==2, d[0]==4, d[1]==5, len(e)==1, e[0]==4,
       len(f)==5, f[0]==5, f[-1]==1, f[1]==4)
+
+
+add = /? + ?/
+add80 = /80 + 2*?/
+add120 = /? + 120/
+print("\t", 200==add(120,80), 200==add120(80), 200==add80(60))
 """[1:-1], False
 
     TEST2 = """
@@ -681,7 +687,7 @@ print(0, "should be", odd(100))
 
     # DEBUG_RAISE:bool = True
     # TEST1:test_all, TEST2:fib, TEST3:while++, TEST4:primes, TEST5:rec++
-    TEST = TEST6
+    TEST = TEST2
     assert not isinstance(TEST, str), "TEST should be tuple[str,bool]"
     ast:Body = Parser(Tokeniser(StringIO(TEST[0])), colon=TEST[1]).read()
     if ast is None:
