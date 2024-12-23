@@ -39,18 +39,19 @@ Functional language with rpython's tracing JIT compiler
 
 
 # Missing from interpreter
-* classes/records (still thinking about the object model)
+* classes/records (requires object model)
 * match/case (requires records)
 * destructuring assignment (requires object model)
-* booleans (instead of reusing `IntValue`)
 * for loops (requires object model)
-* dict/set (requires object model - will be implemented inside lizzzard from scratch)
+* dict/set/bool (requires object model - will be implemented inside lizzzard)
+* short-circuit evaluation for `and` and `or`
+* error messages inside the interpreter
 
 # Missing from interpreter (can be implemented later on)
 * yield (still thinking about it)
 * with/raise (still thinking about it)
 * arbitrary size int (requires object model)
-* comprehension (needs to be implemented in the parser+bytecoder)
+* comprehension (needs to be implemented in the parser)
 
 # Interpreter speed improvements
 * a bytecode optimiser should be able to cut the number of instructions by ~15% but the speed increase might be negligible

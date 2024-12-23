@@ -529,7 +529,7 @@ Not implemented:
 """
 
 BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=",
-               "or", "len", "idx", "simple_idx", "simple_idx=", "[]"]
+               "or", "not", "len", "idx", "simple_idx", "simple_idx=", "[]"]
 BUILTIN_SIDES = ["print", "append"]
 BUILTIN_HELPERS = ["$prev_env"]
 

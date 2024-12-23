@@ -109,6 +109,17 @@ class ListValue(Value):
         return u"array[size=" + int_to_str(self.len()) + u"]"
 
 
+class NoneValue(Value):
+    _immutable_fields_ = []
+    __slots__ = ()
+
+    def __init__(self): pass
+
+    def __repr__(self):
+        return u"none"
+
+
+NONE = const(NoneValue())
 ZERO = const(IntValue(0))
 ONE = const(IntValue(1))
 FALSE = const(BoolValue(0))
@@ -119,33 +130,42 @@ TRUE = const(BoolValue(1))
 @elidable
 def get_type(value):
     if value is None:
+        return u"undefined" # This should never be used
+    if value is NONE:
         return u"none"
     if isinstance(value, IntValue):
-        return u"int"
+        return u"Int"
     if isinstance(value, StrValue):
-        return u"str"
+        return u"Str"
     if isinstance(value, LinkValue):
-        return u"link"
+        return u"Link"
     if isinstance(value, ListValue):
-        return u"list"
+        return u"List"
     if isinstance(value, FuncValue):
-        return u"func"
+        return u"Func"
     return u"unknown"
 
 @look_inside
-@elidable
 def force_bool(val):
     if val is None:
+        assert False, "InternalError: undefined in regs"
+    if val is NONE:
         return False
-    if isinstance(val, IntValue):
-        return bool(val.value)
-    if isinstance(val, StrValue):
-        return bool(val.value)
-    if isinstance(val, ListValue):
-        return bool(val.len())
     if isinstance(val, LinkValue):
-        assert False, "InternalError: LinkValue in Regs"
+        assert False, "InternalError: LinkValue in regs"
+    if isinstance(val, IntValue):
+        return val.value != 0
+    if isinstance(val, StrValue):
+        return len(val.value) != 0
+    if isinstance(val, ListValue):
+        return val.len() != 0
     return True
+
+@look_inside
+@elidable
+def to_bool_value(boolean):
+    assert isinstance(boolean, bool), "TypeError"
+    return TRUE if boolean else FALSE
 
 
 @look_inside
@@ -157,6 +177,11 @@ def reg_index(regs, idx):
         return ONE
     else:
         return regs[idx]
+
+@look_inside
+def reg_store(regs, reg, value):
+    assert value is not None, "trying to store undefined inside a register"
+    regs[reg] = value
 
 
 def bytecode_debug_str(pc, bt):
@@ -252,7 +277,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
             else:
                 if value is None:
                     raise_name_error(bt.name)
-                regs[bt.reg] = value
+                reg_store(regs, bt.reg, value)
 
         elif isinstance(bt, BStoreLoadListEnv):
             assert ENV_IS_LIST, "Invalid flag/bytecode"
@@ -266,7 +291,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
             if bt.storing:
                 scope[bt.name] = reg_index(regs, bt.reg)
             else:
-                regs[bt.reg] = scope[bt.name]
+                reg_store(regs, bt.reg, scope[bt.name])
 
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
@@ -280,12 +305,12 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
                 literal = StrValue(bt_literal.value)
             elif bt.type == BLiteral.NONE_T:
-                literal = None
+                literal = NONE
             elif bt.type == BLiteral.LIST_T:
                 literal = ListValue()
             else:
                 raise NotImplementedError()
-            regs[bt.reg] = literal
+            reg_store(regs, bt.reg, literal)
 
         elif isinstance(bt, BJump):
             value = reg_index(regs, bt.condition_reg)
@@ -302,17 +327,17 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
 
         elif isinstance(bt, BRegMove):
+            value = reg_index(regs, bt.reg2)
             if bt.reg1 == 2:
-                ret_val = reg_index(regs, bt.reg2)
                 if len(stack) == 0:
-                    if not isinstance(ret_val, IntValue):
-                        raise_type_error(u"exit value should be an int not " + get_type(ret_val))
-                    print(u"[EXIT]: " + int_to_str(ret_val.value))
+                    if not isinstance(value, IntValue):
+                        raise_type_error(u"exit value should be an int not " + get_type(value))
+                    print(u"[EXIT]: " + int_to_str(value.value))
                     break
-                env, regs, pc, res_reg = stack.pop()
-                regs[res_reg] = ret_val
+                env, regs, pc, copy_to = stack.pop()
             else:
-                regs[bt.reg1] = reg_index(regs, bt.reg2)
+                copy_to = bt.reg1
+            reg_store(regs, copy_to, value)
 
         elif isinstance(bt, BCall):
             func = const(reg_index(regs, bt.regs[1]))
@@ -340,7 +365,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     raise_type_error(u"too few arguments")
                 # Copy arguments values into new regs
                 for i in range(2, len(bt.regs)):
-                    regs[i+1] = old_regs[bt.regs[i]]
+                    reg_store(regs, i+1, old_regs[bt.regs[i]])
                 # Tell the JIT compiler about the jump
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
@@ -357,12 +382,12 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 else:
                     value = builtin_side(op, args)
                 if bt.regs[0] > 1: # Don't store values inside ZERO,ONE
-                    regs[bt.regs[0]] = value
+                    reg_store(regs, bt.regs[0], value)
 
 
 @look_inside
 def builtin_pure(op, args, op_print):
-    if op in (u"+", u"*", u"==", u"len", u"idx", u"simple_idx"):
+    if op in (u"+", u"*", u"==", u"!=", u"len", u"idx", u"simple_idx"):
         if (len(args) > 0) and isinstance(args[0], ListValue):
             return builtin_pure_list(op, args, op)
         elif (len(args) == 2) and isinstance(args[1], ListValue):
@@ -424,6 +449,11 @@ def builtin_pure_list(op, args, op_print):
             return TRUE
         return FALSE
 
+    elif op == u"!=":
+        v = builtin_pure_list(u"==", args, op_print)
+        assert isinstance(v, BoolValue), "InternalError"
+        return to_bool_value(not v.value)
+
     elif op == u"len":
         if len(args) != 1:
             raise_type_error(op_print + u" expects 1 argument")
@@ -439,17 +469,17 @@ def builtin_pure_list(op, args, op_print):
         if not isinstance(arg0, ListValue):
             raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
         length = arg0.len()
-        if arg3 is None: # step
+        if arg3 is NONE: # step
             step = 1
         elif isinstance(arg3, IntValue):
             step = arg3.value
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the step arg")
-            return None
+            return NONE
         if step == 0:
             raise_type_error(op_print + u" doesn't support 0 for the step arg")
-            return None
-        if arg1 is None: # start
+            return NONE
+        if arg1 is NONE: # start
             start = 0 if step > 0 else length
         elif isinstance(arg1, IntValue):
             start = arg1.value
@@ -457,8 +487,8 @@ def builtin_pure_list(op, args, op_print):
                 start += length
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
-            return None
-        if arg2 is None: # stop
+            return NONE
+        if arg2 is NONE: # stop
             stop = -1 if step < 0 else length
         elif isinstance(arg2, IntValue):
             stop = arg2.value
@@ -466,7 +496,7 @@ def builtin_pure_list(op, args, op_print):
                 stop += length
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
-            return None
+            return NONE
         new = ListValue()
         for idx in range(start, stop, step):
             if 0 <= idx < length:
@@ -504,7 +534,7 @@ def builtin_pure_list(op, args, op_print):
         if not (0 <= idx < length):
             raise_index_error(u"when setting idx=" + int_to_str(idx))
         arg0.index_set(idx, arg2)
-        return None
+        return NONE
 
     elif op == u"[]":
         new = ListValue()
@@ -609,7 +639,7 @@ def builtin_pure_nonlist(op, args, op_print):
     elif op == u"!=":
         v = builtin_pure(u"==", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
-        return FALSE if v.value else TRUE
+        return to_bool_value(not v.value)
 
     elif op == u"<":
         if len(args) != 2:
@@ -644,18 +674,23 @@ def builtin_pure_nonlist(op, args, op_print):
     elif op == u"<=":
         v = builtin_pure(u">", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
-        return FALSE if v.value else TRUE
+        return to_bool_value(not v.value)
 
     elif op == u">=":
         v = builtin_pure(u"<", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
-        return FALSE if v.value else TRUE
+        return to_bool_value(not v.value)
 
     elif op == u"or":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         return arg0 if force_bool(arg0) else arg1
+
+    elif op == u"not":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects 1 argument")
+        return to_bool_value(not force_bool(args[0]))
 
     elif op == u"len":
         if len(args) != 1:
@@ -688,6 +723,8 @@ def builtin_pure_nonlist(op, args, op_print):
 @elidable
 def inner_repr(obj):
     if obj is None:
+        return u"undefined"
+    if obj is NONE:
         return u"none"
     elif isinstance(obj, IntValue):
         return int_to_str(obj.value)
@@ -714,7 +751,7 @@ def builtin_side(op, args):
             if i != len(args)-1:
                 string += u" "
         print(u"[STDOUT]: " + string)
-        return None
+        return NONE
     elif op == u"append":
         if len(args) != 2:
             raise_type_error(op + u" expected 2 arguments")
@@ -722,7 +759,7 @@ def builtin_side(op, args):
         if not isinstance(arg0, ListValue):
             raise_type_error(op + u" expected a list as its 1st argument")
         arg0.append(arg1)
-        return None
+        return NONE
     raise_unreachable_error(u"Builtin " + op + u" not implemented")
     assert False, "Unreachable"
 
