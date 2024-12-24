@@ -201,12 +201,18 @@ if USE_JIT:
 
 
 def interpret(flags, frame_size, env_size, bytecode):
+    global ENV_IS_LIST
     if ENV_IS_LIST != flags.is_set("ENV_IS_LIST"):
-        if ENV_IS_LIST:
-            print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST but the clizz file wasn't\x1b[0m")
+        if PYTHON == 3:
+            global PREV_ENV
+            ENV_IS_LIST = flags.is_set("ENV_IS_LIST")
+            PREV_ENV = 0 if ENV_IS_LIST else "$prev_env"
         else:
-            print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST==false but the clizz file uses ENV_IS_LIST\x1b[0m")
-        raise SystemExit()
+            if ENV_IS_LIST:
+                print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST but the clizz file wasn't\x1b[0m")
+            else:
+                print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST==false but the clizz file uses ENV_IS_LIST\x1b[0m")
+            raise SystemExit()
     # Create teleports
     teleports = Dict()
     for i, bt in enumerate(bytecode):

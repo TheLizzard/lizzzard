@@ -16,7 +16,8 @@ def derialise_int(data, size):
 def serialise_str(string, size_size):
     assert isinstance(size_size, int), "TypeError"
     assert isinstance(string, str), "TypeError"
-    return int_to_bytes(len(string), size_size) + string.encode("utf-8")
+    encoded = string.encode("utf-8")
+    return int_to_bytes(len(encoded), size_size) + encoded
 def derialise_str(data, size_size):
     assert len(data) >= size_size, "ValueError"
     length, data = derialise_int(data, size_size)

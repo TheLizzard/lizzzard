@@ -1,4 +1,5 @@
 from __future__ import annotations
+from contextlib import contextmanager
 from functools import reduce
 from operator import iconcat
 from io import StringIO
@@ -140,6 +141,7 @@ class State:
         assert isinstance(name_token, Token), "TypeError"
         assert isinstance(reg, int), "TypeError"
         assert reg > 1, "ValueError"
+        if self.must_ret: return None
         state:State = self
         while state is not None:
             name:str = state.guard_env(name_token)
@@ -192,6 +194,12 @@ class State:
         if not self.flags.is_set("CLEAR_AFTER_USE"):
             self.append_bast(BLiteral(reg, BLiteralEmpty(), BLiteral.NONE_T))
         return reg
+
+    @contextmanager
+    def get_free_reg_wrapper(self) -> int:
+        reg:int = self.get_free_reg()
+        yield reg
+        self.free_reg(reg)
 
     # Block helpers
     def append_bast(self, instruction:Bast) -> None:
@@ -252,10 +260,9 @@ class ByteCoder:
         for cmd in self.ast:
             reg:int = self._convert(cmd, state)
             state.free_reg(reg)
-        tmp_reg:int = state.get_free_reg()
-        state.append_bast(BLiteral(tmp_reg, BLiteralInt(0), BLiteral.INT_T))
-        state.append_bast(BRegMove(2, tmp_reg))
-        state.free_reg(tmp_reg)
+        with state.get_free_reg_wrapper() as tmp_reg:
+            state.append_bast(BLiteral(tmp_reg, BLiteralInt(0), BLiteral.INT_T))
+            state.append_bast(BRegMove(2, tmp_reg))
         state.fransform()
         while self._todo:
             self._todo.pop(0)()
@@ -285,7 +292,14 @@ class ByteCoder:
         bytecode:Block = reduce(iconcat, bytecode_blocks, [])
         return self._serialise(frame_size, env_size, bytecode)
 
+    def _convert_body(self, body:Body, state:State) -> None:
+        for cmd in body:
+            reg:int = self._convert(cmd, state)
+            if reg > 1:
+                state.free_reg(reg)
+
     def _convert(self, cmd:Cmd, state:State) -> int:
+        assert isinstance(cmd, Cmd), "TypeError"
         if not isinstance(cmd, NonLocal):
             state.first_inst:bool = False
         res_reg:int = 0
@@ -305,13 +319,12 @@ class ByteCoder:
                         args:list[int] = []
                         for exp in target.args:
                             args.append(self._convert(exp, state))
-                        tmp_reg:int = state.get_free_reg()
-                        state.append_bast(BStoreLoadDictEnv("simple_idx=",
-                                                            tmp_reg, False))
-                        state.append_bast(BCall([0,tmp_reg] + args + [reg]))
-                        state.free_reg(tmp_reg)
-                        for tmp_reg in args:
-                            state.free_reg(tmp_reg)
+                        with state.get_free_reg_wrapper() as tmp_reg:
+                            state.append_bast(BStoreLoadDictEnv("simple_idx=",
+                                                                tmp_reg, False))
+                            state.append_bast(BCall([0,tmp_reg] + args + [reg]))
+                        for reg in args:
+                            state.free_reg(reg)
                     elif target.op == ".":
                         raise NotImplementedError("TODO")
                     elif target.op == "·,·":
@@ -493,13 +506,15 @@ class ByteCoder:
                 if state.master is None:
                     # Returning from global scope
                     pass
-                state.must_ret:bool = True
                 if cmd.exp is None:
                     reg:int = state.get_none_reg()
                 else:
                     reg:int = self._convert(cmd.exp, state)
                 state.append_bast(BRegMove(2, reg))
                 state.free_reg(reg)
+                # This must be at the end otherwise cmd.exp will not be
+                #   converted properly
+                state.must_ret:bool = True
             else:
                 raise NotImplementedError("TODO")
 
