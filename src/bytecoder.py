@@ -32,7 +32,7 @@ class Regs:
     __slots__ = "_taken", "max_reg", "_parent"
 
     def __init__(self, parent:Regs=None) -> Regs:
-        self._taken:list[bool] = [True,True,True] # 0,1,return
+        self._taken:list[bool] = [True,True] # 0,1
         self._parent:Regs = parent
         self.max_reg:int = 3
 
@@ -74,7 +74,7 @@ EnvReason:type = dict[str:Branch]
 class State:
     __slots__ = "block", "blocks", "regs", "nonlocals", "loop_labels", \
                 "master", "env", "not_env", "must_ret", "first_inst", \
-                "flags"
+                "flags", "must_end_loop"
 
     def __init__(self, *, blocks:list[Block], nonlocals:Nonlocals,
                  block:Block, loop_labels:list[LoopLabel], regs:Regs,
@@ -84,6 +84,7 @@ class State:
         self.nonlocals:Nonlocals = nonlocals
         self.blocks:list[Block] = blocks
         self.not_env:EnvReason = not_env
+        self.must_end_loop:bool = False
         self.flags:FeatureFlags = flags
         self.first_inst:bool = True
         self.must_ret:bool = False
@@ -95,7 +96,7 @@ class State:
     # Copy helpers
     def copy_for_func(self) -> State:
         new_nl:NonLocals = {name:link+1 for name,link in self.nonlocals.items()}
-        state:State = State(blocks=self.blocks, loop_labels=[], block=Block(),
+        state:State = State(blocks=self.blocks, block=Block(), loop_labels=[],
                             nonlocals=new_nl, regs=Regs(self.regs), env=Env(),
                             not_env=self.not_env.copy(), flags=self.flags,
                             master=self)
@@ -108,6 +109,14 @@ class State:
                      regs=self.regs, env=self.env.copy(), flags=self.flags,
                      not_env=self.not_env.copy(), master=self.master)
 
+    def copy_for_class(self) -> State:
+        state:State = State(blocks=self.blocks, block=Block(), loop_labels=[],
+                            nonlocals=self.nonlocals, regs=self.regs, env=Env(),
+                            not_env=self.not_env.copy(), flags=self.flags,
+                            master=self)
+        state.blocks.append(state.block)
+        return state
+
     @staticmethod
     def new(flags:FeatureFlags) -> State:
         block:Block = Block()
@@ -116,11 +125,12 @@ class State:
                      not_env=EnvReason(), flags=flags)
 
     # Env helpers
-    def merge_branch(self, branch:Branch, other:State) -> None:
-        if self.must_ret:
+    def _merge_branch(self, branch:Branch, other:State) -> None:
+        if self.must_ret or self.must_end_loop:
             self.not_env:EnvReason = other.not_env
             self.env:Env = other.env
-        if other.must_ret:
+            return
+        if other.must_ret or other.must_end_loop:
             return
         self.not_env |= other.not_env
         for name in other.env:
@@ -131,32 +141,40 @@ class State:
                 self.not_env[name] = branch
         for name in self.env:
             if name not in other.env:
-                self.env.pop(name)
+                self.env.remove(name)
                 if name in other.not_env:
                     self.not_env[name] = other.not_env[name]
                 else:
                     self.not_env[name] = branch
 
+    def merge_branch(self, branch:Branch, other:State) -> None:
+        self._merge_branch(branch, other)
+        self.must_end_loop:bool = (self.must_end_loop or self.must_ret) and \
+                                  (other.must_end_loop or other.must_ret)
+        self.must_ret &= other.must_ret
+
     def assert_read(self, name_token:Token, reg:int) -> None:
         assert isinstance(name_token, Token), "TypeError"
         assert isinstance(reg, int), "TypeError"
         assert reg > 1, "ValueError"
+        if self.must_end_loop: return None
         if self.must_ret: return None
         state:State = self
         while state is not None:
-            name:str = state.guard_env(name_token)
+            name:str = state._guard_env(name_token)
             if name in state.env:
                 self.append_bast(BStoreLoadDictEnv(name, reg, False))
                 return
             state:State = state.master
         name_token.throw(f"variable {name!r} was not defined")
 
-    def guard_env(self, name_token:Token) -> None:
+    def _guard_env(self, name_token:Token) -> None:
         name:str = name_token.token
         if name in self.not_env:
             branch_token:Token = self.not_env[name].ft
-            name_token.double_throw(f"Variable {name!r} might be undefined " \
-                                    f"because of:", branch_token)
+            branch_token.double_throw(f"Because of this branch",
+                                      f"Variable {name!r} might not be " \
+                                      f"defined here", name_token)
         return name
 
     def assert_can_nonlocal(self, name_token:Token) -> None:
@@ -192,7 +210,7 @@ class State:
     def get_none_reg(self) -> int:
         reg:int = self.get_free_reg()
         if not self.flags.is_set("CLEAR_AFTER_USE"):
-            self.append_bast(BLiteral(reg, BLiteralEmpty(), BLiteral.NONE_T))
+            self.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
         return reg
 
     @contextmanager
@@ -262,7 +280,7 @@ class ByteCoder:
             state.free_reg(reg)
         with state.get_free_reg_wrapper() as tmp_reg:
             state.append_bast(BLiteral(tmp_reg, BLiteralInt(0), BLiteral.INT_T))
-            state.append_bast(BRegMove(2, tmp_reg))
+            state.append_bast(BRet(tmp_reg, MAX_REG_VALUE))
         state.fransform()
         while self._todo:
             self._todo.pop(0)()
@@ -350,7 +368,7 @@ class ByteCoder:
                 state.append_bast(BLiteral(res_reg, BLiteralStr(value.token),
                                            BLiteral.STR_T))
             elif value in ("true", "false"):
-                res_reg:int = value == "true"
+                res_reg:int = int(value == "true")
             elif value == "none":
                 res_reg:int = state.get_none_reg()
             elif value.isfloat():
@@ -478,9 +496,8 @@ class ByteCoder:
                     nstate.free_reg(tmp_reg)
                 reg:int = nstate.get_free_reg()
                 if not self._flags.is_set("CLEAR_AFTER_USE"):
-                    nstate.append_bast(BLiteral(reg, BLiteralEmpty(),
-                                                BLiteral.NONE_T))
-                nstate.append_bast(BRegMove(2, reg))
+                    nstate.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
+                nstate.append_bast(BRet(reg, MAX_REG_VALUE))
                 nstate.fransform()
                 func_literal.env_size = len(nstate.full_env) + 1
             # Convert the Func to bytecode after the rest of the code in the
@@ -510,11 +527,9 @@ class ByteCoder:
                     reg:int = state.get_none_reg()
                 else:
                     reg:int = self._convert(cmd.exp, state)
-                state.append_bast(BRegMove(2, reg))
+                state.append_bast(BRet(reg, MAX_REG_VALUE))
                 state.free_reg(reg)
-                # This must be at the end otherwise cmd.exp will not be
-                #   converted properly
-                state.must_ret:bool = True
+                state.must_ret:bool = True # Must be at the end
             else:
                 raise NotImplementedError("TODO")
 
@@ -529,6 +544,21 @@ class ByteCoder:
             start_label, end_label = state.loop_labels[-cmd.n]
             label:str = end_label if cmd.isbreak else start_label
             state.append_bast(BJump(label, 1, False))
+            state.must_end_loop:bool = True # Must be at the end
+
+        elif isinstance(cmd, Class):
+            res_reg:int = state.get_free_reg()
+            bases:list[Reg]
+            for base in cmd.bases:
+                bases.append(self._convert(base, state))
+            state.append_bast(BLiteral(res_reg, BLiteralListInt(bases),
+                                       BLiteral.CLASS_T))
+            for base in bases:
+                state.free_reg(base)
+            for assignment in cmd.attributes:
+                self._convert(assignment, state)
+            raise NotImplementedError("TODO finish this after implementing " \
+                                      "env capture returns")
 
         else:
             raise NotImplementedError(f"Not implemented {cmd!r}")
@@ -543,6 +573,9 @@ class ByteCoder:
 
 if __name__ == "__main__":
     TEST1 = """
+print("The following should be all 1s/`true`s")
+
+
 f = func(x){
     g = func(){return x}
     return g
@@ -553,7 +586,7 @@ c = func(f){
 }
 x = 5
 y = 2
-print(0, "should be", c(f(x+y))-7)
+print("\t", 7==c(f(x+y)))
 
 
 f = func(x, y){
@@ -570,15 +603,14 @@ while (z > 0){
         break
     }
 }
-print(5, "should be", z)
+print("\t", 5==z)
 
 
 x = [5, 10, 15]
-print(10, "should be", x[1])
+print("\t", 10==x[1])
 x[1] = 15
-print(15, "should be", x[1])
 append(x, 20)
-print(20, "should be", x[3])
+print("\t", 15==x[1], 20==x[3])
 
 
 x = 21
@@ -598,8 +630,7 @@ add = tmp[0]
 get = tmp[1]
 add()
 add()
-print(25, "should be", x)
-print(30, "should be", get()+5)
+print("\t", 25==x, get()+5==30)
 
 
 Y = func(f){
@@ -613,10 +644,9 @@ fact_helper = func(rec){
     }
 }
 fact = Y(fact_helper)
-print(120, "should be", fact(5))
+print("\t", 120==fact(5))
 
 
-print("The following should be all 1s/`true`s")
 x = [1, 2, 3, 4, 5]
 a = x[:2]
 b = x[2:]
@@ -632,7 +662,22 @@ print("\t", len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4, b[2]==5,
 add = /? + ?/
 add80 = /80 + 2*?/
 add120 = /? + 120/
+isodd = func(x) {
+    if (x == 0) {
+        return 0
+    }
+    return iseven(x-1)
+}
+iseven = func(x) {
+    if (x == 0) {
+        return 1
+    }
+    return isodd(x-1)
+}
+
 print("\t", 200==add(120,80), 200==add120(80), 200==add80(60))
+print("\t", isodd(101), iseven(246), 1-isodd(246), 1-iseven(101),
+            isodd(1), iseven(0))
 """[1:-1], False
 
     TEST2 = """
@@ -683,26 +728,11 @@ print(f(100_000), "should be", 100_000)
 """[1:-1], False
 
     TEST6 = """
-odd = func(x){
-    if x == 0{
-        return 0
-    }
-    return 1 - even(x-1)
-}
-even = func(x){
-    if x == 0{
-        return 1
-    }
-    return 1 - odd(x-1)
-}
-
-print(1, "should be", even(100))
-print(0, "should be", odd(100))
 """[1:-1], False
 
     # DEBUG_RAISE:bool = True
     # TEST1:test_all, TEST2:fib, TEST3:while++, TEST4:primes, TEST5:rec++
-    TEST = TEST2
+    TEST = TEST1
     assert not isinstance(TEST, str), "TEST should be tuple[str,bool]"
     ast:Body = Parser(Tokeniser(StringIO(TEST[0])), colon=TEST[1]).read()
     if ast is None:

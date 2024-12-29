@@ -169,7 +169,6 @@ def to_bool_value(boolean):
 
 
 @look_inside
-@elidable
 def reg_index(regs, idx):
     if idx == 0:
         return ZERO
@@ -314,6 +313,11 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 literal = NONE
             elif bt.type == BLiteral.LIST_T:
                 literal = ListValue()
+            elif bt.type == BLiteral.CLASS_T:
+                assert isinstance(bt_literal, BLiteralListInt), "TypeError"
+                raise NotImplementedError("Implement __mro__ algo")
+                raise NotImplementedError("Implement ClassValue")
+                literal = ClassValue()
             else:
                 raise NotImplementedError()
             reg_store(regs, bt.reg, literal)
@@ -333,17 +337,17 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
 
         elif isinstance(bt, BRegMove):
-            value = reg_index(regs, bt.reg2)
-            if bt.reg1 == 2:
-                if len(stack) == 0:
-                    if not isinstance(value, IntValue):
-                        raise_type_error(u"exit value should be an int not " + get_type(value))
-                    print(u"[EXIT]: " + int_to_str(value.value))
-                    break
-                env, regs, pc, copy_to = stack.pop()
-            else:
-                copy_to = bt.reg1
-            reg_store(regs, copy_to, value)
+            reg_store(regs, bt.reg1, reg_index(regs, bt.reg2))
+
+        elif isinstance(bt, BRet):
+            value = reg_index(regs, bt.reg)
+            if len(stack) == 0:
+                if not isinstance(value, IntValue):
+                    raise_type_error(u"exit value should be an int not " + get_type(value))
+                print(u"[EXIT]: " + int_to_str(value.value))
+                break
+            env, regs, pc, ret_reg = stack.pop()
+            reg_store(regs, ret_reg, value)
 
         elif isinstance(bt, BCall):
             func = const(reg_index(regs, bt.regs[1]))

@@ -65,8 +65,8 @@ class Token:
     def throw(self, msg:str) -> None:
         self.stamp.throw(msg)
 
-    def double_throw(self, msg:str, other:Token) -> None:
-        self.stamp.double_throw(msg, other.stamp)
+    def double_throw(self, msg1:str, msg2:str, other:Token) -> None:
+        self.stamp.double_throw(msg1, msg2, other.stamp)
 
 
 class Stamp:
@@ -83,9 +83,9 @@ class Stamp:
     def throw(self, msg:str) -> None:
         self._throw(self._get_err_msg(msg))
 
-    def double_throw(self, msg:str, other:Stamp) -> None:
-        new_msg:str = "\n" + self._get_err_msg("On")
-        new_msg += "\n" + other._get_err_msg(msg)
+    def double_throw(self, msg1:str, msg2:str, other:Stamp) -> None:
+        new_msg:str = self._get_err_msg(msg1)
+        new_msg += "\n" + other._get_err_msg(msg2)
         self._throw(new_msg)
 
     def _get_err_msg(self, msg:str) -> str:
@@ -233,11 +233,12 @@ class Tokeniser:
         assert isinstance(msg, str), "TypeError"
         self.under.throw(msg, stamp=stamp)
 
-    def throw(self, msg:str, token:Token=None) -> None:
-        assert isinstance(token, Token|None), "TypeError"
-        assert isinstance(msg, str), "TypeError"
-        stamp:Stamp = self.under.stamp() if (token is None) else token.stamp
-        self._throw(msg, stamp=stamp)
+    # Depricated
+    # def throw(self, msg:str, token:Token=None) -> None:
+    #     assert isinstance(token, Token|None), "TypeError"
+    #     assert isinstance(msg, str), "TypeError"
+    #     stamp:Stamp = self.under.stamp() if (token is None) else token.stamp
+    #     self._throw(msg, stamp=stamp)
 
     def __bool__(self) -> bool:
         return (not self.ran_out) or bool(self.buffer)
