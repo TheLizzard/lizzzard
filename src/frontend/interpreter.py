@@ -371,7 +371,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     raise_type_error(u"too few arguments")
                 # Copy arguments values into new regs
                 for i in range(2, len(bt.regs)):
-                    reg_store(regs, i+1, old_regs[bt.regs[i]])
+                    reg_store(regs, i+1, reg_index(old_regs, bt.regs[i]))
                 # Tell the JIT compiler about the jump
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
