@@ -17,12 +17,15 @@ class Dict:
         self.buckets = [[] for i in range(_DICT_LENGTH)]
 
     @look_inside
-    @elidable
     def get(self, key, default):
         for k, v in self.buckets[self._hash(key)]:
             if k == key:
                 return v
         return default
+
+    @look_inside
+    def __getitem__(self, key): # Returns None if KeyError
+        return self.get(key, None)
 
     @look_inside
     def copy(self):

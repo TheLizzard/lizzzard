@@ -45,21 +45,21 @@ class Func(Expr):
 
 
 class Class(Expr):
-    __slots__ = "ft", "attributes", "bases", "functional"
+    __slots__ = "ft", "insides", "bases", "functional"
 
-    def __init__(self, ft:Token, bases:list[Expr], attributes:list[Assign],
+    def __init__(self, ft:Token, bases:list[Expr], insides:Body,
                  functional:bool) -> Class:
         assert isinstance(functional, bool), "TypeError"
-        assert islist(attributes, Assign), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert islist(insides, Cmd), "TypeError"
         assert islist(bases, Expr), "TypeError"
-        self.attributes:list[Assign] = attributes
         self.bases:list[Expr] = bases
+        self.insides:Body = insides
         self.ft:Token = ft
         super().__init__()
 
     def __repr__(self) -> str:
-        return f"Class({repr(self.bases)[1:-1]}){self.attributes}"
+        return f"Class({repr(self.bases)[1:-1]}){self.insides}"
 
 
 class Assign:

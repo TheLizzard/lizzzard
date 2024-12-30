@@ -608,9 +608,9 @@ class Parser:
                 bases:list[Expr] = [raw_bases]
 
         body:list[Cmd] = self._read_line__colon_block()
-        for cmd in body:
-            if not isinstance(cmd, Assign):
-                self.throw("Expected assignment", cmd)
+        # for cmd in body:
+        #     if not isinstance(cmd, Assign):
+        #         self.throw("Expected assignment", cmd)
 
         return Class(class_token, bases, body, functional)
 
@@ -762,7 +762,7 @@ def _assert_partials_exp(exp:Expr, allow_qs:bool=False) -> None:
     elif isinstance(exp, Class):
         for base in exp.bases:
             _assert_partials_exp(base)
-        assert_partials(exp.attributes)
+        assert_partials(exp.insides)
     elif isinstance(exp, Var):
         token:Token = exp.identifier
         if token == "?":
@@ -785,7 +785,7 @@ def _replace_partial_qs_exp(exp:Expr, args:list[Var]) -> Expr:
         exp.exp1:Expr = _replace_partial_qs(exp.exp1, args)
         exp.exp2:Expr = _replace_partial_qs(exp.exp2, args)
     elif isinstance(exp, Class):
-        _replace_partial_qs(exp.attributes)
+        _replace_partial_qs(exp.insides)
     elif isinstance(exp, Var):
         token:Token = exp.identifier
         if token == "?":

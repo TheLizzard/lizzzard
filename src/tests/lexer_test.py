@@ -52,6 +52,7 @@ if __name__ == "__main__":
             assert t.read() == exp, f"Test error in {code!r}"
         for i in range(10):
             assert t.read() == "\n", "Should be empty"
+    print("\x1b[92m[TEST]: All tests passed\x1b[0m")
 
 
 """

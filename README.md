@@ -15,15 +15,15 @@ Functional language with rpython's tracing JIT compiler
 | If             |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | While          |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | Return         |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
-| Break/Continue |     ✔ |      ✔ |   ✔ |                   |   ✔ |           ✔ |
+| Break/Continue |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | MatchCase      |     ✔ |      ✔ |     |                   |     |             |
 | NonLocal       |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | For            |     ✔ |      ✔ |     |                   |   - |           - |
 | Yield          |     ✔ |      ✔ |     |                   |     |             |
 | With           |     ✔ |      ✔ |     |                   |     |             |
 | Exceptions     |     ✔ |      ✔ |     |                   |     |             |
-| Comprehension  |     ✔ |        |     |                   |   - |           - |
-| Partial funcs  |     ✔ |      ✔ |   - |                   |   - |           - |
+| Comprehension  |     ✔ |        |   - |                 - |   - |           - |
+| Partial funcs  |     ✔ |      ✔ |   - |                 - |   - |           - |
 
 
 | Type     | Lexer | Parser | IR | Interpreter |
@@ -46,14 +46,13 @@ Functional language with rpython's tracing JIT compiler
 * dict/set/bool (requires object model - will be implemented inside lizzzard)
 * short-circuit evaluation for `and` and `or`
 * error messages inside the interpreter
-* break/continue statements have no effect on semantic analyser
+* variable capture for func/proc/partial (still thinking about it)
 
 # Missing from interpreter (can be implemented later on)
 * yield (still thinking about it)
 * with/raise (still thinking about it)
 * arbitrary size int (requires object model)
 * comprehension (needs to be implemented in the parser)
-* variable capture for func/proc/partial (still thinking about it)
 
 # Interpreter speed improvements
 * a bytecode optimiser should be able to cut the number of instructions by ~15% but the speed increase might be negligible

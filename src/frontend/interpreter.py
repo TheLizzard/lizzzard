@@ -49,10 +49,7 @@ class FuncValue(Value):
 
     def __init__(self, tp, master, env_size, nargs):
         assert isinstance(env_size, int), "TypeError"
-        if ENV_IS_LIST:
-            assert isinstance(master, list), "TypeError"
-        else:
-            assert isinstance(master, Dict), "TypeError"
+        assert isinstance(master, ENV_TYPE), "TypeError"
         assert isinstance(nargs, int), "TypeError"
         assert isinstance(tp, int), "TypeError"
         self.env_size = env_size
@@ -119,6 +116,22 @@ class NoneValue(Value):
         return u"none"
 
 
+class ClassValue(Value):
+    _immutable_fields_ = ["bases", "master"]
+    __slots__ = "bases", "master" # "metaclass" is unused
+
+    def __init__(self, bases, master):
+        assert isinstance(bases, ListValue), "TypeError"
+        assert isinstance(master, ENV_TYPE), "TypeError"
+        self.master = master
+        self.bases = bases
+        if len(bases.array) > 0:
+            raise NotImplementedError("Inheritance not implemented yet")
+
+    def __repr__(self):
+        return u"class"
+
+
 NONE = const(NoneValue())
 ZERO = const(IntValue(0))
 ONE = const(IntValue(1))
@@ -143,6 +156,8 @@ def get_type(value):
         return u"List"
     if isinstance(value, FuncValue):
         return u"Func"
+    if isinstance(value, ClassValue):
+        return u"Class"
     return u"unknown"
 
 @look_inside
@@ -167,7 +182,6 @@ def to_bool_value(boolean):
     assert isinstance(boolean, bool), "TypeError"
     return TRUE if boolean else FALSE
 
-
 @look_inside
 def reg_index(regs, idx):
     if idx == 0:
@@ -180,8 +194,9 @@ def reg_index(regs, idx):
 @look_inside
 def reg_store(regs, reg, value):
     assert value is not None, "trying to store undefined inside a register"
+    if reg < 1:
+        return # Don't store in regs 0 or 1
     regs[reg] = value
-
 
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
@@ -198,14 +213,26 @@ if USE_JIT:
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
     jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","stack","env","regs"], get_printable_location=get_location)
 
+ENV_IS_LIST = True
+if ENV_IS_LIST:
+    PREV_ENV_IDX = 0
+    BASES_IDX = 1
+    ENV_TYPE = list
+else:
+    PREV_ENV_IDX = u"$prev_env"
+    BASES_IDX = u"$cls_bases"
+    ENV_TYPE = Dict
+
 
 def interpret(flags, frame_size, env_size, bytecode):
     global ENV_IS_LIST
     if ENV_IS_LIST != flags.is_set("ENV_IS_LIST"):
         if PYTHON == 3:
-            global PREV_ENV
+            global PREV_ENV_IDX, BASES_IDX, ENV_TYPE
             ENV_IS_LIST = flags.is_set("ENV_IS_LIST")
-            PREV_ENV = 0 if ENV_IS_LIST else "$prev_env"
+            PREV_ENV_IDX = 0 if ENV_IS_LIST else "$prev_env"
+            BASES_IDX = 0 if ENV_IS_LIST else "$cls_bases"
+            ENV_TYPE = list if ENV_IS_LIST else Dict
         else:
             if ENV_IS_LIST:
                 print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST but the clizz file wasn't\x1b[0m")
@@ -237,12 +264,6 @@ def interpret(flags, frame_size, env_size, bytecode):
     _interpret(bytecode, teleports, regs, env, flags)
 
 
-ENV_IS_LIST = True
-if ENV_IS_LIST:
-    PREV_ENV = 0
-else:
-    PREV_ENV = u"$prev_env"
-
 def _interpret(bytecode, teleports, regs, env, flags):
     CLEAR_AFTER_USE = const(flags.is_set("CLEAR_AFTER_USE"))
 
@@ -271,7 +292,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
             scope, value = env, env.get(bt.name, None)
             if isinstance(value, LinkValue):
                 for i in range(value.link):
-                    scope_holder = scope.get(PREV_ENV, None)
+                    scope_holder = scope[PREV_ENV_IDX]
                     assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
                     scope = scope_holder.master
                 if not bt.storing:
@@ -289,7 +310,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
             # Get the correct scope
             scope = env
             for i in range(bt.link):
-                scope_holder = scope[PREV_ENV]
+                scope_holder = scope[PREV_ENV_IDX]
                 assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
                 scope = scope_holder.master
             # Store/Load variable
@@ -314,10 +335,20 @@ def _interpret(bytecode, teleports, regs, env, flags):
             elif bt.type == BLiteral.LIST_T:
                 literal = ListValue()
             elif bt.type == BLiteral.CLASS_T:
-                assert isinstance(bt_literal, BLiteralListInt), "TypeError"
-                raise NotImplementedError("Implement __mro__ algo")
-                raise NotImplementedError("Implement ClassValue")
-                literal = ClassValue()
+                assert isinstance(bt_literal, BLiteralClass), "TypeError"
+                bases = ListValue()
+                for base in bt_literal.bases:
+                    bases.append(reg_index(regs, base))
+                stack.append((env,regs,pc,bt.reg))
+                if ENV_IS_LIST:
+                    env = [None]*bt_literal.env_size
+                else:
+                    env = env.copy()
+                env[BASES_IDX], env[PREV_ENV_IDX] = bases, FuncValue(-1,env,-1,-1)
+                literal = NONE
+                tp = teleports.get(bt_literal.label, None)
+                assert isinstance(tp, IntValue), "TypeError"
+                pc, regs = const(tp.value), list(regs)
             else:
                 raise NotImplementedError()
             reg_store(regs, bt.reg, literal)
@@ -340,12 +371,21 @@ def _interpret(bytecode, teleports, regs, env, flags):
             reg_store(regs, bt.reg1, reg_index(regs, bt.reg2))
 
         elif isinstance(bt, BRet):
-            value = reg_index(regs, bt.reg)
-            if len(stack) == 0:
-                if not isinstance(value, IntValue):
-                    raise_type_error(u"exit value should be an int not " + get_type(value))
-                print(u"[EXIT]: " + int_to_str(value.value))
-                break
+            if bt.capture_env:
+                bases = env[BASES_IDX]
+                if not isinstance(bases, ListValue):
+                    raise_type_error(u"bases is not a list")
+                for base in bases.array:
+                    if not isinstance(base, ClassValue):
+                        raise_type_error(u"bases is not a list of classes")
+                value = ClassValue(bases, env)
+            else:
+                value = reg_index(regs, bt.reg)
+                if len(stack) == 0:
+                    if not isinstance(value, IntValue):
+                        raise_type_error(u"exit value should be an int not " + get_type(value))
+                    print(u"[EXIT]: " + int_to_str(value.value))
+                    break
             env, regs, pc, ret_reg = stack.pop()
             reg_store(regs, ret_reg, value)
 
@@ -367,7 +407,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     env = [None]*func.env_size
                 else:
                     env = func.master.copy()
-                env[PREV_ENV] = func
+                env[PREV_ENV_IDX] = func
                 # Check number of args
                 if len(bt.regs)-2 > func.nargs:
                     raise_type_error(u"too many arguments")
@@ -380,7 +420,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
             else: # Built-ins
-                op_idx = tp_value - len(bytecode) - 1
+                op_idx = tp_value - len(bytecode) - len(BUILTIN_HELPERS)
                 pure_op = op_idx < len(BUILTIN_OPS)
                 if pure_op:
                     op = BUILTIN_OPS[op_idx]
@@ -391,8 +431,9 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     value = builtin_pure(op, args, op)
                 else:
                     value = builtin_side(op, args)
-                if bt.regs[0] > 1: # Don't store values inside ZERO,ONE
-                    reg_store(regs, bt.regs[0], value)
+                reg_store(regs, bt.regs[0], value)
+        else:
+            raise NotImplementedError("Haven't implemented this bytecode yet")
 
 
 @look_inside
