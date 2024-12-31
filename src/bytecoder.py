@@ -57,7 +57,7 @@ class Regs:
 
     def clear_reg(self, reg:int, instructions:Block) -> None:
         if reg > 1:
-            instructions.append(BLiteral(reg, BNONE, BLiteral.NONE_T))
+            instructions.append(BLiteral(reg, BNONE, BLiteral.UNDEFINED_T))
 
     def _notify_max_reg(self, max_reg:int) -> None:
         self.max_reg:int = max(self.max_reg, max_reg)
@@ -74,13 +74,14 @@ EnvReason:type = dict[str:Branch]
 class State:
     __slots__ = "block", "blocks", "regs", "nonlocals", "loop_labels", \
                 "master", "env", "not_env", "must_ret", "first_inst", \
-                "flags", "must_end_loop", "class_state"
+                "flags", "must_end_loop", "uses", "class_state", "_attrs"
 
     def __init__(self, *, blocks:list[Block], nonlocals:Nonlocals,
                  block:Block, loop_labels:list[LoopLabel], regs:Regs,
                  env:Env, not_env:EnvReason, flags:FeatureFlags,
-                 master:State=None) -> State:
+                 master:State=None, uses:dict[str:tuple[Token,bool]]) -> State:
         self.loop_labels:list[LoopLabel] = loop_labels
+        self.uses:dict[str:tuple[Token,bool]] = uses
         self.nonlocals:Nonlocals = nonlocals
         self.blocks:list[Block] = blocks
         self.not_env:EnvReason = not_env
@@ -88,20 +89,41 @@ class State:
         self.flags:FeatureFlags = flags
         self.class_state:bool = False
         self.first_inst:bool = True
+        self._attrs:list[str] = []
         self.must_ret:bool = False
         self.master:State = master
         self.block:Block = block
         self.regs:Regs = regs
         self.env:Env = env
 
+    @property
+    def attrs(self) -> list[str]:
+        state:State = self
+        while state.master:
+            state:State = state.master
+        return state._attrs
+
+    def add_attr(self, attr:str) -> None:
+        if attr not in self.attrs:
+            self.attrs.append(attr)
+
+    @property
+    def full_env(self) -> Env:
+        return BUILTIN_HELPERS + self.env + sorted(list(self.not_env))
+
     # Copy helpers
-    def copy_for_func(self) -> State:
-        a:int = 1 if (self.master is None) else (1 + self.master.class_state)
+    def _for_block(self) -> tuple[Nonlocals,State]:
+        a:int = 0 if self.class_state else 1
         new_nl:NonLocals = {name:link+a for name,link in self.nonlocals.items()}
+        master:State = self.master if self.class_state else self
+        return new_nl, master
+
+    def copy_for_func(self) -> State:
+        new_nl, master = self._for_block()
         state:State = State(blocks=self.blocks, block=Block(), loop_labels=[],
                             nonlocals=new_nl, regs=Regs(self.regs), env=Env(),
                             not_env=self.not_env.copy(), flags=self.flags,
-                            master=self)
+                            master=master, uses={})
         state.blocks.append(state.block)
         return state
 
@@ -109,14 +131,15 @@ class State:
         return State(blocks=self.blocks, loop_labels=self.loop_labels,
                      block=self.block, nonlocals=self.nonlocals,
                      regs=self.regs, env=self.env.copy(), flags=self.flags,
-                     not_env=self.not_env.copy(), master=self.master)
+                     not_env=self.not_env.copy(), master=self.master,
+                     uses=self.uses.copy())
 
     def copy_for_class(self) -> State:
-        new_nl:NonLocals = {name:link+1 for name,link in self.nonlocals.items()}
+        new_nl, master = self._for_block()
         state:State = State(blocks=self.blocks, block=Block(), loop_labels=[],
                             nonlocals=new_nl, regs=Regs(self.regs), env=Env(),
                             not_env=self.not_env.copy(), flags=self.flags,
-                            master=self)
+                            master=master, uses={})
         state.blocks.append(state.block)
         state.class_state:bool = True
         return state
@@ -124,8 +147,10 @@ class State:
     @staticmethod
     def new(flags:FeatureFlags) -> State:
         block:Block = Block()
+        env:Env = Env(BUILTINS[len(BUILTIN_HELPERS):])
+        uses:dict[str:tuple[Token,bool]] = {n:(None,True) for n in BUILTINS}
         return State(block=block, blocks=[block], nonlocals=Nonlocals(),
-                     loop_labels=[], regs=Regs(), env=Env(BUILTINS[1:]),
+                     loop_labels=[], regs=Regs(), env=env, uses=uses,
                      not_env=EnvReason(), flags=flags)
 
     # Env helpers
@@ -166,9 +191,12 @@ class State:
         state:State = self
         while state is not None:
             name:str = state._guard_env(name_token)
-            if name in state.env:
-                self.append_bast(BStoreLoadDictEnv(name, reg, False))
-                return
+            if (not state.class_state) or (state is self): # skip class def vars
+                if name in state.env:
+                    if name not in self.uses:
+                        self.uses[name] = (name_token, False)
+                    self.append_bast(BStoreLoadDict(name, reg, False))
+                    return
             state:State = state.master
         name_token.throw(f"variable {name!r} was not defined")
 
@@ -184,11 +212,16 @@ class State:
     def assert_can_nonlocal(self, name_token:Token) -> None:
         assert isinstance(name_token, Token), "TypeError"
         name:str = name_token.token
+        if name in self.uses:
+            used_token, iswrite = self.uses[name]
+            used_token.double_throw("You used this variable before",
+                                    "you declaired it as nonlocal", name_token)
         if name not in self.master.env:
             name_token.throw(f"variable {name!r} not defined in parent scope")
 
-    def write_env(self, name:str) -> None:
-        assert isinstance(name, str), "TypeError"
+    def write_env(self, token:Token) -> None:
+        assert isinstance(token, Token), "TypeError"
+        name:str = token.token
         if name in self.nonlocals:
             # TODO: merge name with nonlocals
             pass
@@ -196,6 +229,14 @@ class State:
             if name in self.not_env:
                 self.not_env.pop(name)
             self.env.append(name)
+            used_token, iswrite = self.uses.get(name, (None,True))
+            if not iswrite:
+                used_token.double_throw("This variable read here refers to " \
+                                        "a nonlocal variable",
+                                        "But this variable write here is to " \
+                                        "a nonlocal variable. Perhaps you " \
+                                        f"forgot `nonlocal {name}`?", token)
+            self.uses[name] = (token, True)
 
     # Reg helpers
     def free_reg(self, reg:int) -> None:
@@ -213,8 +254,7 @@ class State:
 
     def get_none_reg(self) -> int:
         reg:int = self.get_free_reg()
-        if not self.flags.is_set("CLEAR_AFTER_USE"):
-            self.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
+        self.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
         return reg
 
     @contextmanager
@@ -228,20 +268,24 @@ class State:
         assert isinstance(instruction, Bast), "TypeError"
         self.block.append(instruction)
 
-    # Fransform
-    def fransform(self) -> None:
+    # Fransforms
+    def fransform_func(self) -> None:
         if not self.flags.is_set("ENV_IS_LIST"):
             return None
         nonlocals:Nonlocals = Nonlocals()
         fransformed_block:Block = Block()
-        for i, bt in enumerate(self.block):
+        for bt in self.block:
             if isinstance(bt, BLoadLink):
                 nonlocals[bt.name] = bt.link
                 continue
-            elif isinstance(bt, BStoreLoadDictEnv):
+            elif isinstance(bt, BDotDict) and self.flags.is_set("ENV_IS_LIST"):
+                self.add_attr(bt.attr)
+                attr_idx:int = self.attrs.index(bt.attr)
+                bt:Bast = BDotList(bt.obj_reg, attr_idx, bt.reg, bt.storing)
+            elif isinstance(bt, BStoreLoadDict):
                 scope, link = self, 0
                 if bt.name in nonlocals:
-                    for i in range(nonlocals[bt.name]):
+                    for _ in range(nonlocals[bt.name]):
                         scope, link = scope.master, link+1
                 else:
                     while bt.name not in scope.full_env:
@@ -249,15 +293,41 @@ class State:
                         if scope is None:
                             raise NotImplementedError(f"{bt.name!r} cannot " \
                                                       f"be found")
-                idx:int = scope.full_env.index(bt.name) + 1
-                bt:Bast = BStoreLoadListEnv(link, idx, bt.reg, bt.storing)
+                idx:int = scope.full_env.index(bt.name)
+                bt:Bast = BStoreLoadList(link, idx, bt.reg, bt.storing)
             fransformed_block.append(bt)
-        self.block.clear()
-        self.block.extend(fransformed_block)
+        self.block[:] = fransformed_block
 
-    @property
-    def full_env(self) -> Env:
-        return self.env + sorted(list(self.not_env))
+    def fransform_class(self) -> None:
+        fransformed_block:Block = Block()
+        for bt in self.block:
+            if isinstance(bt, BStoreLoadDict):
+                if bt.name not in self.nonlocals:
+                    self.add_attr(bt.name)
+                    if self.flags.is_set("ENV_IS_LIST"):
+                        attr_idx:int = self.attrs.index(bt.name)
+                        bt:Bast = BDotList(CLS_REG, attr_idx, bt.reg,
+                                           bt.storing)
+                    else:
+                        bt:Bast = BDotDict(CLS_REG, bt.name, bt.reg,
+                                           bt.storing)
+            fransformed_block.append(bt)
+        self.block[:] = fransformed_block
+        self.fransform_func()
+        # The stull bellow should be unneeded as long as the if above the
+        #   add_attr(bt.name) reads:
+        #   > if bt.name not in self.nonlocals
+        #   and not:
+        #   > if bt.name in self.env
+        # This is because class scopes don't get an env in the interpreter
+        #   so they don't get tmp variables. As an optimisation, I can
+        #   put those tmp variables in self.regs # TODO
+        for name, branch in self.not_env.items():
+            if name in self.attrs: continue
+            get_first_token(branch).throw(f"Variable {name!r} might not be " \
+                                          f"defined because of this branch. " \
+                                          f"No teporary variables are " \
+                                          f"allowed in a class scope")
 
 
 class Block(list[Bast]):
@@ -278,7 +348,7 @@ class ByteCoder:
         self._states:list[State] = []
         self.ast:Body = ast
 
-    def _to_bytecode(self) -> tuple[int,int,list[Block]]:
+    def _to_bytecode(self) -> tuple[int,int,list[str],list[Block]]:
         state:State = State.new(self._flags)
         self._states:list[State] = [state]
         self._labels.reset()
@@ -288,34 +358,32 @@ class ByteCoder:
         with state.get_free_reg_wrapper() as tmp_reg:
             state.append_bast(BLiteral(tmp_reg, BLiteralInt(0), BLiteral.INT_T))
             state.append_bast(BRet(tmp_reg, False))
-        state.fransform()
+        state.fransform_func()
         while self._todo:
             self._todo.pop(0)()
-        return state.regs.max_reg+1, len(state.full_env)+1, state.blocks
+        return state.regs.max_reg+1, len(state.full_env), state.attrs, \
+               state.blocks
 
-    def to_bytecode(self) -> tuple[RegsSize,EnvSize,list[Block]]:
+    def to_bytecode(self) -> tuple[RegsSize,EnvSize,list[str],list[Block]]:
         try:
             return self._to_bytecode()
         except (SemanticError, FinishedWithError) as error:
             if DEBUG_RAISE and isinstance(error, FinishedWithError):
                 print(traceback.format_exc(), end="")
             print(f"\x1b[91mSemanticError: {error.msg}\x1b[0m", file=stderr)
-            return 3, 0, []
+            return 3, 0, [], []
 
-    def _serialise(self, frame_size:int, env_size:int, bytecode:Block) -> bytes:
+    def _serialise(self, frame_size:int, env_size:int, attrs:list[str],
+                   bytecode:Block) -> bytes:
         bast:bytearray = bytearray()
         for instruction in bytecode:
             bast += instruction.serialise()
-        return serialise_int(VERSION, VERSION_SIZE) + \
-               self._flags.serialise() + \
-               serialise_int(frame_size, FRAME_SIZE) + \
-               serialise_int(env_size, ENV_SIZE_SIZE) + \
-               bytes(bast)
+        return serialise(self._flags, frame_size, env_size, attrs, bytes(bast))
 
     def serialise(self) -> bytes:
-        frame_size, env_size, bytecode_blocks = self.to_bytecode()
+        frame_size, env_size, attrs, bytecode_blocks = self.to_bytecode()
         bytecode:Block = reduce(iconcat, bytecode_blocks, [])
-        return self._serialise(frame_size, env_size, bytecode)
+        return self._serialise(frame_size, env_size, attrs, bytecode)
 
     def _convert_body(self, body:Body, state:State) -> None:
         for cmd in body:
@@ -331,13 +399,12 @@ class ByteCoder:
         if isinstance(cmd, Assign):
             for target in cmd.targets:
                 if isinstance(target, Var):
-                    name:str = target.identifier.token
-                    state.write_env(name)
+                    state.write_env(target.identifier)
             reg:int = self._convert(cmd.value, state)
             for target in cmd.targets:
                 if isinstance(target, Var):
-                    state.append_bast(BStoreLoadDictEnv(target.identifier.token,
-                                                        reg, True))
+                    state.append_bast(BStoreLoadDict(target.identifier.token,
+                                                     reg, True))
                 elif isinstance(target, Op):
                     # res_reg:int = state.get_free_reg()
                     if target.op == "simple_idx":
@@ -345,8 +412,8 @@ class ByteCoder:
                         for exp in target.args:
                             args.append(self._convert(exp, state))
                         with state.get_free_reg_wrapper() as tmp_reg:
-                            state.append_bast(BStoreLoadDictEnv("simple_idx=",
-                                                                tmp_reg, False))
+                            state.append_bast(BStoreLoadDict("simple_idx=",
+                                                             tmp_reg, False))
                             state.append_bast(BCall([0,tmp_reg] + args + [reg]))
                         for reg in args:
                             state.free_reg(reg)
@@ -355,7 +422,7 @@ class ByteCoder:
                             raise NotImplementedError("Impossible")
                         attr:str = target.args[1].identifier.token
                         obj_reg:int = self._convert(target.args[0], state)
-                        state.append_bast(BDot(obj_reg, attr, reg, True))
+                        state.append_bast(BDotDict(obj_reg, attr, reg, True))
                         state.free_reg(obj_reg)
                     elif target.op == "·,·":
                         raise NotImplementedError("TODO")
@@ -421,7 +488,7 @@ class ByteCoder:
                 res_reg:int = state.get_free_reg()
                 attr:str = cmd.args[1].identifier.token
                 obj_reg:int = self._convert(cmd.args[0], state)
-                state.append_bast(BDot(obj_reg, attr, res_reg, False))
+                state.append_bast(BDotDict(obj_reg, attr, res_reg, False))
                 state.free_reg(obj_reg)
             else:
                 res_reg:int = state.get_free_reg()
@@ -507,27 +574,25 @@ class ByteCoder:
                 self._states.append(nstate)
                 nstate.append_bast(label_start)
                 for i, arg in enumerate(cmd.args, start=3):
-                    name:str = arg.identifier.token
-                    assert isinstance(name, str), "TypeError"
-                    nstate.write_env(name)
-                    nstate.append_bast(BStoreLoadDictEnv(name, i, True))
+                    token:Token = arg.identifier
+                    nstate.write_env(token)
+                    nstate.append_bast(BStoreLoadDict(token.token, i, True))
                 for subcmd in cmd.body:
                     tmp_reg:int = self._convert(subcmd, nstate)
                     nstate.free_reg(tmp_reg)
                 reg:int = nstate.get_free_reg()
-                if not self._flags.is_set("CLEAR_AFTER_USE"):
-                    nstate.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
+                nstate.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
                 nstate.append_bast(BRet(reg, False))
-                nstate.fransform()
-                func_literal.env_size = len(nstate.full_env) + 1
+                nstate.fransform_func()
+                func_literal.env_size = len(nstate.full_env)
             # Convert the Func to bytecode after the rest of the code in the
             #   currect scope. This allows for mutual recursion
             self._todo.append(todo)
 
         elif isinstance(cmd, NonLocal):
-            if not state.first_inst:
-                cmd.ft.throw("nonlocal directives must be at the top of " \
-                             "the scope")
+            # if not state.first_inst:
+            #     cmd.ft.throw("nonlocal directives must be at the top of " \
+            #                  "the scope")
             if state.master is None:
                 cmd.ft.throw("variables in the global scope can't be nonlocal")
             for identifier_token in cmd.identifiers:
@@ -535,10 +600,9 @@ class ByteCoder:
                 if identifier not in state.nonlocals:
                     if state.master.class_state:
                         state.master.assert_can_nonlocal(identifier_token)
-                        state.nonlocals[identifier] = 2
                     else:
                         state.assert_can_nonlocal(identifier_token)
-                        state.nonlocals[identifier] = 1
+                    state.nonlocals[identifier] = 1
                 link:int = state.nonlocals[identifier]
                 state.append_bast(BLoadLink(identifier, link))
 
@@ -582,18 +646,20 @@ class ByteCoder:
             bases:list[Reg] = []
             for base in cmd.bases:
                 bases.append(self._convert(base, state))
-            cls_literal:BLiteralClass = BLiteralClass(0, bases, label)
+            cls_literal:BLiteralClass = BLiteralClass(bases, label)
             state.append_bast(BLiteral(res_reg, cls_literal, BLiteral.CLASS_T))
             for base in bases:
                 state.free_reg(base)
             def todo() -> None:
                 nstate:State = state.copy_for_class()
                 nstate.append_bast(Bable(label))
+                cls_obj_reg:int = nstate.get_free_reg()
+                assert cls_obj_reg == CLS_REG, "InternalError"
                 for assignment in cmd.insides:
                     self._convert(assignment, nstate)
+                nstate.free_reg(cls_obj_reg)
                 nstate.append_bast(BRet(0, True))
-                nstate.fransform()
-                cls_literal.env_size = len(nstate.full_env) + 1
+                nstate.fransform_class()
             self._todo.append(todo)
 
         else:
@@ -622,7 +688,7 @@ c = func(f){
 }
 x = 5
 y = 2
-print("\t", 7==c(f(x+y)))
+print(1, "\t", 7==c(f(x+y)))
 
 
 f = func(x, y){
@@ -639,14 +705,14 @@ while (z > 0){
         break
     }
 }
-print("\t", 5==z)
+print(1, "\t", 5==z)
 
 
 x = [5, 10, 15]
-print("\t", 10==x[1])
+print(1, "\t", 10==x[1])
 x[1] = 15
 append(x, 20)
-print("\t", 15==x[1], 20==x[3])
+print(2, "\t", 15==x[1], 20==x[3])
 
 
 x = 21
@@ -666,7 +732,7 @@ add = tmp[0]
 get = tmp[1]
 add()
 add()
-print("\t", 25==x, get()+5==30)
+print(2, "\t", 25==x, get()+5==30)
 
 
 Y = func(f){
@@ -680,7 +746,7 @@ fact_helper = func(rec){
     }
 }
 fact = Y(fact_helper)
-print("\t", 120==fact(5))
+print(1, "\t", 120==fact(5))
 
 
 x = [1, 2, 3, 4, 5]
@@ -690,9 +756,9 @@ c = x[1:2]
 d = x[-2:]
 e = x[-2:-1]
 f = x[::-1]
-print("\t", len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4, b[2]==5,
-      len(c)==1, c[0]==2, len(d)==2, d[0]==4, d[1]==5, len(e)==1, e[0]==4,
-      len(f)==5, f[0]==5, f[-1]==1, f[1]==4)
+print(18, "\t", len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4,
+      b[2]==5, len(c)==1, c[0]==2, len(d)==2, d[0]==4, d[1]==5, len(e)==1,
+      e[0]==4, len(f)==5, f[0]==5, f[-1]==1, f[1]==4)
 
 
 add = /? + ?/
@@ -700,20 +766,20 @@ add80 = /80 + 2*?/
 add120 = /? + 120/
 isodd = func(x) {
     if (x == 0) {
-        return 0
+        return false
     }
     return iseven(x-1)
 }
 iseven = func(x) {
     if (x == 0) {
-        return 1
+        return true
     }
     return isodd(x-1)
 }
 
-print("\t", 200==add(120,80), 200==add120(80), 200==add80(60))
-print("\t", isodd(101), iseven(246), 1-isodd(246), 1-iseven(101),
-            isodd(1), iseven(0))
+print(3, "\t", 200==add(120,80), 200==add120(80), 200==add80(60))
+print(6, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
+      isodd(1), iseven(0))
 """[1:-1], False
 
     TEST2 = """
@@ -770,16 +836,32 @@ A = class {
     X = 5
     f = func() {
         nonlocal t
-        print(X, "should be", 5)
+        print(A.X, "should be", 6)
         print(A, "should be a class")
-        t = X + 1
+        t = A.X + 1
+        A.X = 0
     }
     t = X
+    if X {a=0}
 }
 print(t, "should be", 5)
 A.X = 6
 A.f()
 print(t, "should be", 7)
+print(A.X, "should be", 0)
+"""[1:-1], False
+
+    TEST7 = """
+A = class {
+    X = 0
+}
+
+i = 0
+while i < 10000000 {
+    i += 1
+    A.X += 1
+}
+print(A.X)
 """[1:-1], False
 
     # DEBUG_RAISE:bool = True
@@ -795,7 +877,7 @@ print(t, "should be", 7)
         flags.set("CLEAR_AFTER_USE")
 
         bytecoder:ByteCoder = ByteCoder(ast, flags)
-        frame_size, env_size, bytecode_blocks = bytecoder.to_bytecode()
+        frame_size, env_size, attrs, bytecode_blocks = bytecoder.to_bytecode()
         bytecode:Block = reduce(iconcat, bytecode_blocks, [])
         if bytecode:
             print(bytecode_list_to_str(bytecode))
@@ -805,13 +887,15 @@ print(t, "should be", 7)
                 file.write(raw_bytecode)
 
             data = derialise(raw_bytecode)
-            dec_flags, dec_frame_size, dec_env_size, dec_bast = data
+            dec_flags, dec_frame_size, dec_env_size, dec_attrs, dec_bast = data
             print(f"{frame_size=}, {flags=}")
             assert bytecode_list_to_str(bytecode) == \
                    bytecode_list_to_str(dec_bast), "AssertionError"
             assert frame_size == dec_frame_size, "AssertionError"
-            assert env_size == dec_env_size, "AssertionError"
             assert flags.issame(dec_flags), "AssertionError"
+            if flags.is_set("ENV_IS_LIST"):
+                assert env_size == dec_env_size, "AssertionError"
+                assert attrs == dec_attrs, "AssertionError"
 
     # fib = lambda x: 1 if x < 1 else fib(x-2)+fib(x-1)
     # print(fib(30))

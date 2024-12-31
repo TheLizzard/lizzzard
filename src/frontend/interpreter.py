@@ -58,7 +58,7 @@ class FuncValue(Value):
         self.tp = tp
 
     def __repr__(self):
-        return u"FuncValue[tp=" + int_to_str(self.tp) + u"]"
+        return u"func"
 
 
 class LinkValue(Value):
@@ -98,7 +98,6 @@ class ListValue(Value):
         self.array[idx] = value
 
     @look_inside
-    @elidable
     def len(self):
         return len(self.array)
 
@@ -116,20 +115,26 @@ class NoneValue(Value):
         return u"none"
 
 
-class ClassValue(Value):
-    _immutable_fields_ = ["bases", "master"]
-    __slots__ = "bases", "master" # "metaclass" is unused
+class ObjectValue(Value):
+    _immutable_fields_ = ["bases", "attr_vals", "type", "master"]
+    __slots__ = "bases", "attr_vals", "type", "master"
 
-    def __init__(self, bases, master):
-        assert isinstance(bases, ListValue), "TypeError"
+    def __init__(self, bases, master, type):
         assert isinstance(master, ENV_TYPE), "TypeError"
-        self.master = master
-        self.bases = bases
-        if len(bases.array) > 0:
+        assert isinstance(bases, list), "TypeError"
+        assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
+        if len(bases) > 0:
             raise NotImplementedError("Inheritance not implemented yet")
+        if ENV_IS_LIST:
+            self.attr_vals = []
+        else:
+            self.attr_vals = master
+        self.bases = const([const(base) for base in bases])
+        self.type = const(type)
+        self.master = master
 
     def __repr__(self):
-        return u"class"
+        return u"object"
 
 
 NONE = const(NoneValue())
@@ -156,7 +161,7 @@ def get_type(value):
         return u"List"
     if isinstance(value, FuncValue):
         return u"Func"
-    if isinstance(value, ClassValue):
+    if isinstance(value, ObjectValue):
         return u"Class"
     return u"unknown"
 
@@ -189,7 +194,9 @@ def reg_index(regs, idx):
     elif idx == 1:
         return ONE
     else:
-        return regs[idx]
+        value = regs[idx]
+        assert value is not None, "InternalError: trying to load undefined"
+        return value
 
 @look_inside
 def reg_store(regs, reg, value):
@@ -198,10 +205,18 @@ def reg_store(regs, reg, value):
         return # Don't store in regs 0 or 1
     regs[reg] = value
 
+@look_inside
+@elidable # Since teleports is constant we can mark this as elidable
+def teleports_get(teleports, label):
+    teleports = const(teleports)
+    label = const(const_str(label))
+    result = teleports.get(label, None)
+    result = const(result)
+    return result
+
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
     data = bytes2(data_unicode)
-    data = data.replace(".", ",")
     while data[-1] == "\n":
         data = data[:-1]
     return data
@@ -211,27 +226,33 @@ if USE_JIT:
     def get_location(pc, bytecode, *_):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
-    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","stack","env","regs"], get_printable_location=get_location)
+    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens"], get_printable_location=get_location)
 
 ENV_IS_LIST = True
 if ENV_IS_LIST:
     PREV_ENV_IDX = 0
-    BASES_IDX = 1
     ENV_TYPE = list
 else:
     PREV_ENV_IDX = u"$prev_env"
-    BASES_IDX = u"$cls_bases"
     ENV_TYPE = Dict
 
 
-def interpret(flags, frame_size, env_size, bytecode):
+@look_inside
+@elidable
+def attr_matrix_idx(matrix, lens, type, attr):
+    if const(matrix[type][attr]) == -1:
+        idx, lens[type] = lens[type], lens[type]+1
+        matrix[type][attr] = const(idx)
+    return const(matrix[type][attr])
+
+
+def interpret(flags, frame_size, env_size, attrs, bytecode):
     global ENV_IS_LIST
     if ENV_IS_LIST != flags.is_set("ENV_IS_LIST"):
         if PYTHON == 3:
-            global PREV_ENV_IDX, BASES_IDX, ENV_TYPE
+            global PREV_ENV_IDX, ENV_TYPE
             ENV_IS_LIST = flags.is_set("ENV_IS_LIST")
             PREV_ENV_IDX = 0 if ENV_IS_LIST else "$prev_env"
-            BASES_IDX = 0 if ENV_IS_LIST else "$cls_bases"
             ENV_TYPE = list if ENV_IS_LIST else Dict
         else:
             if ENV_IS_LIST:
@@ -261,19 +282,24 @@ def interpret(flags, frame_size, env_size, bytecode):
             assert isinstance(op, str), "TypeError"
             env[op] = FuncValue(i+len(bytecode), env, 0, 0)
     # Start actual interpreter
-    _interpret(bytecode, teleports, regs, env, flags)
+    _interpret(bytecode, teleports, regs, env, attrs, flags)
 
 
-def _interpret(bytecode, teleports, regs, env, flags):
+def _interpret(bytecode, teleports, regs, env, attrs, flags):
     CLEAR_AFTER_USE = const(flags.is_set("CLEAR_AFTER_USE"))
 
     bytecode = [const(bt) for bt in bytecode]
     pc = 0 # current instruction being executed
     stack = [] # list[tuple[Env,Regs,Pc,RetReg]]
 
+    next_cls_type = 0
+    attr_matrix = []
+    lens = []
+
     while pc < len(bytecode):
         if USE_JIT:
-            jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
+            jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
+                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
             debug(str(bytecode_debug_str(pc, bt)), 3)
@@ -286,7 +312,7 @@ def _interpret(bytecode, teleports, regs, env, flags):
             assert not ENV_IS_LIST, "Invalid flag/bytecode"
             env[bt.name] = LinkValue(bt.link)
 
-        elif isinstance(bt, BStoreLoadDictEnv):
+        elif isinstance(bt, BStoreLoadDict):
             assert not ENV_IS_LIST, "Invalid flag/bytecode"
             # Get the correct scope
             scope, value = env, env.get(bt.name, None)
@@ -301,11 +327,16 @@ def _interpret(bytecode, teleports, regs, env, flags):
             if bt.storing:
                 scope[bt.name] = reg_index(regs, bt.reg)
             else:
-                if value is None:
-                    raise_name_error(bt.name)
+                while value is None:
+                    scope_holder = scope[PREV_ENV_IDX]
+                    assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
+                    if scope is scope_holder.master:
+                        raise_name_error(bt.name)
+                    scope = scope_holder.master
+                    value = scope[bt.name]
                 reg_store(regs, bt.reg, value)
 
-        elif isinstance(bt, BStoreLoadListEnv):
+        elif isinstance(bt, BStoreLoadList):
             assert ENV_IS_LIST, "Invalid flag/bytecode"
             # Get the correct scope
             scope = env
@@ -318,6 +349,31 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 scope[bt.name] = reg_index(regs, bt.reg)
             else:
                 reg_store(regs, bt.reg, scope[bt.name])
+
+        elif isinstance(bt, BDotDict):
+            assert not ENV_IS_LIST, "Invalid flag/bytecode"
+            obj = reg_index(regs, bt.obj_reg)
+            if not isinstance(obj, ObjectValue):
+                raise_type_error(u". operator expected object got " + get_type(obj) + u" instead")
+            if bt.storing:
+                obj.attr_vals[bt.attr] = reg_index(regs, bt.reg)
+            else:
+                attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr))
+                value = None if attr_idx >= len(obj.attr_vals) else obj.attr_vals[attr_idx]
+                reg_store(regs, bt.reg, value)
+
+        elif isinstance(bt, BDotList):
+            assert ENV_IS_LIST, "Invalid flag/bytecode"
+            obj = reg_index(regs, bt.obj_reg)
+            if not isinstance(obj, ObjectValue):
+                raise_type_error(u". operator expected Object got " + get_type(obj) + u" instead")
+            if bt.storing:
+                attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr))
+                while attr_idx >= len(obj.attr_vals):
+                    obj.attr_vals.append(None)
+                obj.attr_vals[attr_idx] = reg_index(regs, bt.reg)
+            else:
+                reg_store(regs, bt.reg, obj.attr_vals[bt.attr])
 
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
@@ -332,23 +388,30 @@ def _interpret(bytecode, teleports, regs, env, flags):
                 literal = StrValue(bt_literal.value)
             elif bt.type == BLiteral.NONE_T:
                 literal = NONE
+            elif bt.type == BLiteral.UNDEFINED_T:
+                regs[bt.reg] = None
+                continue
             elif bt.type == BLiteral.LIST_T:
                 literal = ListValue()
             elif bt.type == BLiteral.CLASS_T:
                 assert isinstance(bt_literal, BLiteralClass), "TypeError"
-                bases = ListValue()
+                # Create ObjectValue type
+                bases = []
                 for base in bt_literal.bases:
                     bases.append(reg_index(regs, base))
+                # Register new class
+                attr_matrix.append([-1]*len(attrs))
+                class_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
+                lens.append(0)
+                literal = ObjectValue(bases, env, type=class_type)
+                reg_store(regs, bt.reg, literal)
+                # Append to stack
                 stack.append((env,regs,pc,bt.reg))
-                if ENV_IS_LIST:
-                    env = [None]*bt_literal.env_size
-                else:
-                    env = env.copy()
-                env[BASES_IDX], env[PREV_ENV_IDX] = bases, FuncValue(-1,env,-1,-1)
-                literal = NONE
-                tp = teleports.get(bt_literal.label, None)
+                regs[CLS_REG] = literal
+                tp = teleports_get(teleports, bt_literal.label)
                 assert isinstance(tp, IntValue), "TypeError"
                 pc, regs = const(tp.value), list(regs)
+                continue
             else:
                 raise NotImplementedError()
             reg_store(regs, bt.reg, literal)
@@ -358,27 +421,24 @@ def _interpret(bytecode, teleports, regs, env, flags):
             if CLEAR_AFTER_USE and (bt.condition_reg > 1):
                 regs[bt.condition_reg] = None
             condition = force_bool(value)
-            # if condition != bt.negated: # RPython's JIT can't constant fold bt.negated in this form :/
+            # if condition != bt.negated: # RPython's JIT can't constant fold in this form :/
             if (condition and (not bt.negated)) or ((not condition) and bt.negated):
-                tp = teleports.get(bt.label, None)
+                tp = teleports_get(teleports, bt.label)
                 assert isinstance(tp, IntValue), "TypeError"
                 pc = tp.value
                 assert isinstance(bytecode[pc], Bable), "InternalError"
                 if USE_JIT:
-                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
+                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens)
 
         elif isinstance(bt, BRegMove):
             reg_store(regs, bt.reg1, reg_index(regs, bt.reg2))
 
         elif isinstance(bt, BRet):
             if bt.capture_env:
-                bases = env[BASES_IDX]
-                if not isinstance(bases, ListValue):
-                    raise_type_error(u"bases is not a list")
-                for base in bases.array:
-                    if not isinstance(base, ClassValue):
-                        raise_type_error(u"bases is not a list of classes")
-                value = ClassValue(bases, env)
+                if len(stack) == 0:
+                    raise NotImplementedError("Impossible")
+                _, regs, pc, ret_reg = stack.pop()
             else:
                 value = reg_index(regs, bt.reg)
                 if len(stack) == 0:
@@ -386,8 +446,8 @@ def _interpret(bytecode, teleports, regs, env, flags):
                         raise_type_error(u"exit value should be an int not " + get_type(value))
                     print(u"[EXIT]: " + int_to_str(value.value))
                     break
-            env, regs, pc, ret_reg = stack.pop()
-            reg_store(regs, ret_reg, value)
+                env, regs, pc, ret_reg = stack.pop()
+                reg_store(regs, ret_reg, value)
 
         elif isinstance(bt, BCall):
             func = const(reg_index(regs, bt.regs[1]))
@@ -418,7 +478,8 @@ def _interpret(bytecode, teleports, regs, env, flags):
                     reg_store(regs, i+1, reg_index(old_regs, bt.regs[i]))
                 # Tell the JIT compiler about the jump
                 if USE_JIT:
-                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE)
+                    jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens)
             else: # Built-ins
                 op_idx = tp_value - len(bytecode) - len(BUILTIN_HELPERS)
                 pure_op = op_idx < len(BUILTIN_OPS)
@@ -771,7 +832,6 @@ def builtin_pure_nonlist(op, args, op_print):
 
 
 @look_inside
-@elidable
 def inner_repr(obj):
     if obj is None:
         return u"undefined"
@@ -790,6 +850,8 @@ def inner_repr(obj):
             if i != obj.len()-1:
                 string += u", "
         return string + u"]"
+    elif isinstance(obj, ObjectValue):
+        return u"Object"
     else:
         return get_type(obj) + u" doesn't support repr"
 
@@ -816,7 +878,7 @@ def builtin_side(op, args):
 
 
 def raise_name_error(name):
-    print(u"\x1b[91mNameError: " + name + u" was not been defined\x1b[0m")
+    print(u"\x1b[91mNameError: " + name + u" has not been defined\x1b[0m")
     raise_error()
 
 def raise_index_error(msg):
@@ -838,10 +900,10 @@ def raise_error():
 def _main(raw_bytecode):
     assert isinstance(raw_bytecode, bytes), "TypeError"
     debug(u"Derialising bytecode...", 2)
-    flags, frame_size, env_size, bytecode = derialise(raw_bytecode)
+    flags, frame_size, env_size, attrs, bytecode = derialise(raw_bytecode)
     debug(u"Parsing flags...", 2)
     debug(u"Starting interpreter...", 1)
-    interpret(flags, frame_size, env_size, bytecode)
+    interpret(flags, frame_size, env_size, attrs, bytecode)
 
 def main(filepath):
     debug(u"Reading file...", 2)
