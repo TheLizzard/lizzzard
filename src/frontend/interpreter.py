@@ -126,10 +126,10 @@ class ObjectValue(Value):
         if len(bases) > 0:
             raise NotImplementedError("Inheritance not implemented yet")
         if ENV_IS_LIST:
-            self.attr_vals = []
+            self.attr_vals = hint([], promote=True)
         else:
             self.attr_vals = master
-        self.bases = const([const(base) for base in bases])
+        self.bases = [(base) for base in bases]
         self.type = const(type)
         self.master = master
 
@@ -209,7 +209,7 @@ def reg_store(regs, reg, value):
 @elidable # Since teleports is constant we can mark this as elidable
 def teleports_get(teleports, label):
     teleports = const(teleports)
-    label = const(const_str(label))
+    label = const_str(label)
     result = teleports.get(label, None)
     result = const(result)
     return result
@@ -239,11 +239,19 @@ else:
 
 @look_inside
 @elidable
-def attr_matrix_idx(matrix, lens, type, attr):
-    if const(matrix[type][attr]) == -1:
-        idx, lens[type] = lens[type], lens[type]+1
-        matrix[type][attr] = const(idx)
-    return const(matrix[type][attr])
+def attr_matrix_idx(matrix, lens, type, attr, attr_vals):
+    matrix = hint(matrix, promote=True)
+    type = const(type)
+    attr = const(attr)
+    row = hint(matrix[type], promote=True)
+    attr_idx = const(row[attr])
+    if attr_idx == -1:
+        attr_idx, lens[type] = lens[type], lens[type]+1
+        assert attr_idx >= 0, "ValueError"
+        row[attr] = const(attr_idx)
+    if attr >= len(attr_vals):
+        attr_vals.extend([None]*(attr-len(attr_vals)+1))
+    return attr_idx
 
 
 def interpret(flags, frame_size, env_size, attrs, bytecode):
@@ -264,10 +272,10 @@ def interpret(flags, frame_size, env_size, attrs, bytecode):
     teleports = Dict()
     for i, bt in enumerate(bytecode):
         if isinstance(bt, Bable):
-            teleports[const(const_str(bt.id))] = const(IntValue(const(i)))
+            teleports[const_str(bt.id)] = IntValue(i)
     for i, op in enumerate(BUILTINS):
         tp = len(bytecode) + i
-        teleports[const(const_str(int_to_str(tp)))] = const(IntValue(tp))
+        teleports[const_str(int_to_str(tp))] = IntValue(tp)
     # Create regs
     regs = [None]*(frame_size+2)
     # Create env
@@ -358,7 +366,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             if bt.storing:
                 obj.attr_vals[bt.attr] = reg_index(regs, bt.reg)
             else:
-                attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr))
+                attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr, obj.attr_vals))
                 value = None if attr_idx >= len(obj.attr_vals) else obj.attr_vals[attr_idx]
                 reg_store(regs, bt.reg, value)
 
@@ -367,13 +375,11 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             obj = reg_index(regs, bt.obj_reg)
             if not isinstance(obj, ObjectValue):
                 raise_type_error(u". operator expected Object got " + get_type(obj) + u" instead")
+            attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr, obj.attr_vals))
             if bt.storing:
-                attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr))
-                while attr_idx >= len(obj.attr_vals):
-                    obj.attr_vals.append(None)
                 obj.attr_vals[attr_idx] = reg_index(regs, bt.reg)
             else:
-                reg_store(regs, bt.reg, obj.attr_vals[bt.attr])
+                reg_store(regs, bt.reg, obj.attr_vals[attr_idx])
 
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
@@ -400,9 +406,12 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 for base in bt_literal.bases:
                     bases.append(reg_index(regs, base))
                 # Register new class
-                attr_matrix.append([-1]*len(attrs))
                 class_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
-                lens.append(0)
+                for i in range(2):
+                    row = [-1]*len(attrs)
+                    row = hint(row, promote=True)
+                    attr_matrix.append(row)
+                    lens.append(0)
                 literal = ObjectValue(bases, env, type=class_type)
                 reg_store(regs, bt.reg, literal)
                 # Append to stack
@@ -454,7 +463,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             if not isinstance(func, FuncValue):
                 raise_type_error(get_type(func) + u" is not callable")
             assert isinstance(func, FuncValue), "TypeError"
-            tp = teleports.get(int_to_str(func.tp), None)
+            tp = const(teleports[int_to_str(func.tp)])
             if tp is None:
                 raise_name_error(int_to_str(func.tp))
             assert isinstance(tp, IntValue), "TypeError"
@@ -923,3 +932,4 @@ if __name__ == "__main__":
 # https://doi.org/10.1016/j.entcs.2016.12.012
 # /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/rlib/jit.py
 # https://eprints.gla.ac.uk/113615/
+# https://www.hpi.uni-potsdam.de/hirschfeld/publications/media/Pape_2021_EfficientCompoundValuesInVirtualMachines_Dissertation.pdf

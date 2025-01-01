@@ -94,7 +94,7 @@ class Bable(Bast):
 
     def __init__(self, id):
         assert isinstance(id, str), "TypeError"
-        self.id = const(const_str(id))
+        self.id = const_str(id)
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
@@ -139,7 +139,7 @@ class BStoreLoadDict(Bast):
         assert isinstance(reg, int), "TypeError"
         assert 0 <= reg < MAX_REG_VALUE, "ValueError"
         self.storing = const(storing)
-        self.name = const(const_str(name))
+        self.name = const_str(name)
         self.reg = const(reg)
 
     def serialise(self):
@@ -204,7 +204,7 @@ class BLiteralStr(BLiteralHolder):
     __slots__ = "value"
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
-        self.value = const(const_str(value))
+        self.value = const_str(value)
 class BLiteralFunc(BLiteralHolder):
     _immutable_fields_ = ["env_size", "value", "nargs"]
     __slots__ = "env_size", "value", "nargs"
@@ -225,7 +225,7 @@ class BLiteralClass(BLiteralHolder):
             assert isinstance(reg, int), "TypeError"
             assert 0 <= reg < MAX_REG_VALUE, "ValueError"
         self.bases = [const(reg) for reg in bases]
-        self.label = const(const_str(label))
+        self.label = const_str(label)
 class _BLiteralEmpty(BLiteralHolder):
     _immutable_fields_ = []
     __slots__ = ()
@@ -329,7 +329,7 @@ class BJump(Bast):
         assert 0 <= condition_reg < MAX_REG_VALUE, "ValueError"
         self.condition_reg = const(condition_reg)
         self.negated = const(negated)
-        self.label = const(const_str(label))
+        self.label = const_str(label)
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
@@ -381,7 +381,7 @@ class BLoadLink(Bast):
     def __init__(self, name, link):
         assert isinstance(name, str), "TypeError"
         assert isinstance(link, int), "TypeError"
-        self.name = const(const_str(name))
+        self.name = const_str(name)
         self.link = const(link)
 
     def serialise(self):
@@ -433,7 +433,7 @@ class BDotDict(Bast):
         assert isinstance(reg, int), "TypeError"
         assert 0 <= obj_reg < MAX_REG_VALUE, "ValueError"
         assert 0 <= reg < MAX_REG_VALUE, "ValueError"
-        self.attr = const(const_str(attr))
+        self.attr = const_str(attr)
         self.storing = const(storing)
         self.obj_reg = const(obj_reg)
         self.reg = const(reg)

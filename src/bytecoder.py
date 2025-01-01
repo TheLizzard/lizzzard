@@ -852,6 +852,8 @@ print(A.X, "should be", 0)
 """[1:-1], False
 
     TEST7 = """
+B = class {}
+
 A = class {
     X = 0
 }
@@ -859,9 +861,9 @@ A = class {
 i = 0
 while i < 10000000 {
     i += 1
-    A.X += 1
+    A.X = B.Y = i
 }
-print(A.X)
+print(A.X==B.Y, A.X)
 """[1:-1], False
 
     # DEBUG_RAISE:bool = True
