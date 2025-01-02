@@ -89,12 +89,13 @@ class State:
         self.flags:FeatureFlags = flags
         self.class_state:bool = False
         self.first_inst:bool = True
-        self._attrs:list[str] = []
         self.must_ret:bool = False
         self.master:State = master
         self.block:Block = block
         self.regs:Regs = regs
         self.env:Env = env
+        if self.master is None:
+            self._attrs:list[str] = [CONSTRUCTOR_NAME]
 
     @property
     def attrs(self) -> list[str]:
@@ -576,7 +577,7 @@ class ByteCoder:
                 nstate:State = state.copy_for_func()
                 self._states.append(nstate)
                 nstate.append_bast(label_start)
-                for i, arg in enumerate(cmd.args, start=3):
+                for i, arg in enumerate(cmd.args, start=2):
                     token:Token = arg.identifier
                     nstate.write_env(token)
                     nstate.append_bast(BStoreLoadDict(token.token, i, True))
@@ -837,11 +838,12 @@ t = 0
 A = class {
     nonlocal t
     X = 5
-    f = func() {
+    f = func(self) {
         nonlocal t
+        print(self, "should be", "7" if self == 7 else "an instance")
         print(A.X, "should be", 6)
         print(A, "should be a class")
-        t = A.X + 1
+        t = A.X + 2
         A.X = 0
     }
     t = X
@@ -849,9 +851,14 @@ A = class {
 }
 print(t, "should be", 5)
 A.X = 6
-A.f()
-print(t, "should be", 7)
+A.f(7)
+print(t, "should be", 8)
 print(A.X, "should be", 0)
+
+a = A()
+print(a, "should be an object")
+A.X = 6
+a.f()
 """[1:-1], False
 
     TEST7 = """
@@ -875,6 +882,18 @@ while (B.X < 10_000_000) {
 }
 print(B.X)
 """[1:-1], False
+
+    TEST8 = """
+A = class {
+    f = func(self, x) {
+        print(self, x)
+        return self
+    }
+}
+a = A()
+print(a.f)
+print(a==a.f("abc"))
+""", False
 
     # DEBUG_RAISE:bool = True
     # 1:all, 2:fib, 3:while++, 4:primes, 5:rec++, 6:cls

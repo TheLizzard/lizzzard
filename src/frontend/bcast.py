@@ -761,6 +761,9 @@ BUILTIN_HELPERS = ["$prev_env"]
 # "__class__" was in BULTIN_HELPERS but class scope no longer gets an env
 CLS_REG = 2
 
+CONSTRUCTOR_NAME = u"__init__"
+CONSTRUCTOR_IDX = 0
+
 BUILTIN_OPS = list(map(str, BUILTIN_OPS))
 BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))
 BUILTIN_HELPERS = list(map(str, BUILTIN_HELPERS))

@@ -44,15 +44,18 @@ class StrValue(Value):
 
 
 class FuncValue(Value):
-    _immutable_fields_ = ["tp", "master", "env_size", "nargs", "name"]
-    __slots__ = "tp", "master", "env_size", "nargs", "name"
+    _immutable_fields_ = ["tp", "master", "env_size", "nargs", "name", "bound_obj"]
+    __slots__ = "tp", "master", "env_size", "nargs", "name", "bound_obj"
 
-    def __init__(self, tp, master, env_size, nargs, name):
+    def __init__(self, tp, master, env_size, nargs, name, bound_obj):
+        if bound_obj is not None:
+            assert isinstance(bound_obj, ObjectValue), "TypeError"
         assert isinstance(master, ENV_TYPE), "TypeError"
         assert isinstance(env_size, int), "TypeError"
         assert isinstance(nargs, int), "TypeError"
         assert isinstance(name, str), "TypeError"
         assert isinstance(tp, int), "TypeError"
+        self.bound_obj = bound_obj
         self.env_size = env_size
         self.master = master
         self.nargs = nargs
@@ -61,6 +64,10 @@ class FuncValue(Value):
 
     def __repr__(self):
         return u"func"
+
+    def copy_and_bind(self, obj):
+        assert isinstance(obj, ObjectValue), "TypeError"
+        return FuncValue(self.tp, self.master, self.env_size, self.nargs, self.name, obj)
 
 
 class LinkValue(Value):
@@ -118,12 +125,11 @@ class NoneValue(Value):
 
 
 class ObjectValue(Value):
-    _immutable_fields_ = ["mro", "attr_vals", "type", "master", "name"]
-    __slots__ = "mro", "attr_vals", "type", "master", "name"
+    _immutable_fields_ = ["mro", "attr_vals", "type", "name"]
+    __slots__ = "mro", "attr_vals", "type", "name"
 
     @look_inside
-    def __init__(self, bases, master, type, name):
-        assert isinstance(master, ENV_TYPE), "TypeError"
+    def __init__(self, bases, type, name):
         assert isinstance(bases, list), "TypeError"
         assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
         assert isinstance(name, str), "TypeError"
@@ -139,9 +145,8 @@ class ObjectValue(Value):
         if ENV_IS_LIST:
             self.attr_vals = hint([], promote=True)
         else:
-            self.attr_vals = master
+            self.attr_vals = Dict()
         self.mro = [self] + self._merge(mros)
-        self.master = master
         self.name = name
         self.type = type
 
@@ -309,12 +314,12 @@ def interpret(flags, frame_size, env_size, attrs, bytecode):
         env = [None]*env_size
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
-            env[i] = FuncValue(i+len(bytecode), env, 0, 0, op)
+            env[i] = FuncValue(i+len(bytecode), env, 0, 0, op, None)
     else:
         env = Dict()
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
-            env[op] = FuncValue(i+len(bytecode), env, 0, 0, op)
+            env[op] = FuncValue(i+len(bytecode), env, 0, 0, op, None)
     # Start actual interpreter
     _interpret(bytecode, teleports, regs, env, attrs, flags)
 
@@ -417,7 +422,11 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             if bt.storing:
                 cls.attr_vals[attr_idx] = reg_index(regs, bt.reg)
             else:
-                reg_store(regs, bt.reg, cls.attr_vals[attr_idx])
+                value = cls.attr_vals[attr_idx]
+                if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
+                    value = value.copy_and_bind(obj)
+                    cls.attr_vals[attr_idx] = value
+                reg_store(regs, bt.reg, value)
 
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
@@ -426,7 +435,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 literal = IntValue(bt_literal.value)
             elif bt.type == BLiteral.FUNC_T:
                 assert isinstance(bt_literal, BLiteralFunc), "TypeError"
-                literal = FuncValue(bt_literal.value, env, bt_literal.env_size, bt_literal.nargs, bt_literal.name)
+                literal = FuncValue(bt_literal.value, env, bt_literal.env_size, bt_literal.nargs, bt_literal.name, None)
             elif bt.type == BLiteral.STR_T:
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
                 literal = StrValue(bt_literal.value)
@@ -448,9 +457,11 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 for row in attr_matrix:
                     row.append(-1)
                     row.append(-1)
-                lens.append(0)
-                lens.append(0)
-                literal = ObjectValue(bases, env, class_type, bt_literal.name)
+                attr_matrix[0][len(attr_matrix[0])-2] = 0
+                attr_matrix[0][len(attr_matrix[0])-1] = 0
+                lens.append(1)
+                lens.append(1)
+                literal = ObjectValue(bases, class_type, bt_literal.name)
                 reg_store(regs, bt.reg, literal)
                 # Append to stack
                 stack.append((env,regs,pc,bt.reg))
@@ -497,10 +508,23 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 reg_store(regs, ret_reg, value)
 
         elif isinstance(bt, BCall):
+            args = []
             func = const(reg_index(regs, bt.regs[1]))
-            if not isinstance(func, FuncValue):
+            if isinstance(func, ObjectValue) and (func.type&1 == 0):
+                self = ObjectValue([func], func.type+1, func.name)
+                args = [self]
+                func = const(func.attr_vals[CONSTRUCTOR_IDX])
+                if func is None:
+                    reg_store(regs, bt.regs[0], self)
+                    continue
+                if not isinstance(func, FuncValue):
+                    raise_type_error(u"constructor should be a function not " + get_type(func))
+            elif isinstance(func, FuncValue):
+                if func.bound_obj is not None:
+                    args.append(func.bound_obj)
+            else:
                 raise_type_error(get_type(func) + u" is not callable")
-            assert isinstance(func, FuncValue), "TypeError"
+
             tp = const(teleports[int_to_str(func.tp)])
             if tp is None:
                 raise_name_error(int_to_str(func.tp))
@@ -516,13 +540,15 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                     env = func.master.copy()
                 env[PREV_ENV_IDX] = func
                 # Check number of args
-                if len(bt.regs)-2 > func.nargs:
+                if len(bt.regs)-2+len(args) > func.nargs:
                     raise_type_error(u"too many arguments")
-                elif len(bt.regs)-2 < func.nargs:
+                elif len(bt.regs)-2+len(args) < func.nargs:
                     raise_type_error(u"too few arguments")
                 # Copy arguments values into new regs
+                for i in range(2, len(args)+2):
+                    reg_store(regs, i, args[i-2])
                 for i in range(2, len(bt.regs)):
-                    reg_store(regs, i+1, reg_index(old_regs, bt.regs[i]))
+                    reg_store(regs, i+len(args), reg_index(old_regs, bt.regs[i]))
                 # Tell the JIT compiler about the jump
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
@@ -540,6 +566,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 else:
                     value = builtin_side(op, args)
                 reg_store(regs, bt.regs[0], value)
+
         else:
             raise NotImplementedError("Haven't implemented this bytecode yet")
 
@@ -793,6 +820,8 @@ def builtin_pure_nonlist(op, args, op_print):
                 return FALSE
             if arg0.value == arg1.value:
                 return TRUE
+        elif arg0 is arg1:
+            return TRUE
         return FALSE
 
     elif op == u"!=":
@@ -889,7 +918,11 @@ def inner_repr(obj):
     elif isinstance(obj, StrValue):
         return obj.value[1:]
     elif isinstance(obj, FuncValue):
-        return u"Func<" + obj.name + u">"
+        string = u"Func<" + obj.name
+        if obj.bound_obj is not None:
+            string += u" bound to " + inner_repr(obj.bound_obj)
+        string += u">"
+        return string
     elif isinstance(obj, ListValue):
         string = u"["
         for i, element in enumerate(obj.array):
