@@ -44,17 +44,19 @@ class StrValue(Value):
 
 
 class FuncValue(Value):
-    _immutable_fields_ = ["tp", "master", "env_size", "nargs"]
-    __slots__ = "tp", "master", "env_size", "nargs"
+    _immutable_fields_ = ["tp", "master", "env_size", "nargs", "name"]
+    __slots__ = "tp", "master", "env_size", "nargs", "name"
 
-    def __init__(self, tp, master, env_size, nargs):
-        assert isinstance(env_size, int), "TypeError"
+    def __init__(self, tp, master, env_size, nargs, name):
         assert isinstance(master, ENV_TYPE), "TypeError"
+        assert isinstance(env_size, int), "TypeError"
         assert isinstance(nargs, int), "TypeError"
+        assert isinstance(name, str), "TypeError"
         assert isinstance(tp, int), "TypeError"
         self.env_size = env_size
         self.master = master
         self.nargs = nargs
+        self.name = name
         self.tp = tp
 
     def __repr__(self):
@@ -116,22 +118,63 @@ class NoneValue(Value):
 
 
 class ObjectValue(Value):
-    _immutable_fields_ = ["bases", "attr_vals", "type", "master"]
-    __slots__ = "bases", "attr_vals", "type", "master"
+    _immutable_fields_ = ["mro", "attr_vals", "type", "master", "name"]
+    __slots__ = "mro", "attr_vals", "type", "master", "name"
 
-    def __init__(self, bases, master, type):
+    @look_inside
+    def __init__(self, bases, master, type, name):
         assert isinstance(master, ENV_TYPE), "TypeError"
         assert isinstance(bases, list), "TypeError"
         assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
-        if len(bases) > 0:
-            raise NotImplementedError("Inheritance not implemented yet")
+        assert isinstance(name, str), "TypeError"
+        mros = []
+        for base in bases:
+            assert isinstance(base, ObjectValue), "TypeError"
+            mro = base.mro
+            assert isinstance(mro, list), "TypeError"
+            for cls in mro:
+                assert isinstance(cls, ObjectValue), "TypeError"
+            mros.append(mro)
+
         if ENV_IS_LIST:
             self.attr_vals = hint([], promote=True)
         else:
             self.attr_vals = master
-        self.bases = [(base) for base in bases]
-        self.type = const(type)
+        self.mro = [self] + self._merge(mros)
         self.master = master
+        self.name = name
+        self.type = type
+
+    @look_inside
+    def _merge(self, mros):
+        # Stolen from: https://stackoverflow.com/a/54261655/11106801
+        if len(mros) == 0:
+            return []
+        for mro in mros:
+            assert isinstance(mro, list), "TypeError"
+            for cls in mro:
+                assert isinstance(cls, ObjectValue), "TypeError"
+        for mro in mros:
+            candidate = mro[0]
+            failed = False
+            for mro in mros:
+                if failed: break
+                for tail in mro[1:]:
+                    if tail == candidate:
+                        failed = True
+                        break
+            if not failed:
+                tails = []
+                for mro in mros:
+                    if mro[0] is candidate:
+                        if len(mro) > 1:
+                            tails.append(mro[1:])
+                        continue
+                    tails.append(mro)
+                return [candidate] + self._merge(tails)
+                # return [candidate] + self._merge([tail if head is candidate else [head, *tail]
+                #                             for head, *tail in mros])
+        raise_type_error(u"No legal mro")
 
     def __repr__(self):
         return u"object"
@@ -237,23 +280,6 @@ else:
     ENV_TYPE = Dict
 
 
-@look_inside
-@elidable
-def attr_matrix_idx(matrix, lens, type, attr, attr_vals):
-    matrix = hint(matrix, promote=True)
-    type = const(type)
-    attr = const(attr)
-    row = hint(matrix[type], promote=True)
-    attr_idx = const(row[attr])
-    if attr_idx == -1:
-        attr_idx, lens[type] = lens[type], lens[type]+1
-        assert attr_idx >= 0, "ValueError"
-        row[attr] = const(attr_idx)
-    if attr >= len(attr_vals):
-        attr_vals.extend([None]*(attr-len(attr_vals)+1))
-    return attr_idx
-
-
 def interpret(flags, frame_size, env_size, attrs, bytecode):
     global ENV_IS_LIST
     if ENV_IS_LIST != flags.is_set("ENV_IS_LIST"):
@@ -283,12 +309,12 @@ def interpret(flags, frame_size, env_size, attrs, bytecode):
         env = [None]*env_size
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
-            env[i] = FuncValue(i+len(bytecode), env, 0, 0)
+            env[i] = FuncValue(i+len(bytecode), env, 0, 0, op)
     else:
         env = Dict()
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
-            env[op] = FuncValue(i+len(bytecode), env, 0, 0)
+            env[op] = FuncValue(i+len(bytecode), env, 0, 0, op)
     # Start actual interpreter
     _interpret(bytecode, teleports, regs, env, attrs, flags)
 
@@ -301,7 +327,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
     stack = [] # list[tuple[Env,Regs,Pc,RetReg]]
 
     next_cls_type = 0
-    attr_matrix = []
+    attr_matrix = [[] for _ in range(len(attrs))]
     lens = []
 
     while pc < len(bytecode):
@@ -363,23 +389,35 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             obj = reg_index(regs, bt.obj_reg)
             if not isinstance(obj, ObjectValue):
                 raise_type_error(u". operator expected object got " + get_type(obj) + u" instead")
-            if bt.storing:
-                obj.attr_vals[bt.attr] = reg_index(regs, bt.reg)
-            else:
-                attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr, obj.attr_vals))
-                value = None if attr_idx >= len(obj.attr_vals) else obj.attr_vals[attr_idx]
-                reg_store(regs, bt.reg, value)
+            raise NotImplementedError("TODO")
 
         elif isinstance(bt, BDotList):
             assert ENV_IS_LIST, "Invalid flag/bytecode"
             obj = reg_index(regs, bt.obj_reg)
             if not isinstance(obj, ObjectValue):
                 raise_type_error(u". operator expected Object got " + get_type(obj) + u" instead")
-            attr_idx = const(attr_matrix_idx(attr_matrix, lens, obj.type, bt.attr, obj.attr_vals))
-            if bt.storing:
-                obj.attr_vals[attr_idx] = reg_index(regs, bt.reg)
+            # Get cls (the object storing attr) and attr_idx (the idx intocls.attr_vals)
+            mro = hint(obj.mro, promote=True)
+            for cls in mro:
+                cls, type = const(cls), const(cls.type)
+                column = hint(attr_matrix[bt.attr], promote=True)
+                attr_idx = const(column[type])
+                if attr_idx != -1:
+                    break
             else:
-                reg_store(regs, bt.reg, obj.attr_vals[attr_idx])
+                cls = const(obj.mro[0])
+                type = const(cls.type)
+                attr_idx, lens[type] = lens[type], lens[type]+1
+                assert attr_idx >= 0, "ValueError"
+                column = hint(attr_matrix[bt.attr], promote=True)
+                column[type] = const(attr_idx)
+                if bt.attr >= len(cls.attr_vals):
+                    cls.attr_vals.extend([None]*(bt.attr-len(cls.attr_vals)+1))
+            # Use the information above to execute the bytecode
+            if bt.storing:
+                cls.attr_vals[attr_idx] = reg_index(regs, bt.reg)
+            else:
+                reg_store(regs, bt.reg, cls.attr_vals[attr_idx])
 
         elif isinstance(bt, BLiteral):
             bt_literal = bt.literal
@@ -388,7 +426,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 literal = IntValue(bt_literal.value)
             elif bt.type == BLiteral.FUNC_T:
                 assert isinstance(bt_literal, BLiteralFunc), "TypeError"
-                literal = FuncValue(bt_literal.value, env, bt_literal.env_size, bt_literal.nargs)
+                literal = FuncValue(bt_literal.value, env, bt_literal.env_size, bt_literal.nargs, bt_literal.name)
             elif bt.type == BLiteral.STR_T:
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
                 literal = StrValue(bt_literal.value)
@@ -407,12 +445,12 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                     bases.append(reg_index(regs, base))
                 # Register new class
                 class_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
-                for i in range(2):
-                    row = [-1]*len(attrs)
-                    row = hint(row, promote=True)
-                    attr_matrix.append(row)
-                    lens.append(0)
-                literal = ObjectValue(bases, env, type=class_type)
+                for row in attr_matrix:
+                    row.append(-1)
+                    row.append(-1)
+                lens.append(0)
+                lens.append(0)
+                literal = ObjectValue(bases, env, class_type, bt_literal.name)
                 reg_store(regs, bt.reg, literal)
                 # Append to stack
                 stack.append((env,regs,pc,bt.reg))
@@ -851,7 +889,7 @@ def inner_repr(obj):
     elif isinstance(obj, StrValue):
         return obj.value[1:]
     elif isinstance(obj, FuncValue):
-        return u"Func"
+        return u"Func<" + obj.name + u">"
     elif isinstance(obj, ListValue):
         string = u"["
         for i, element in enumerate(obj.array):
@@ -860,7 +898,10 @@ def inner_repr(obj):
                 string += u", "
         return string + u"]"
     elif isinstance(obj, ObjectValue):
-        return u"Object"
+        if obj.type & 1:
+            return u"Object<" + obj.name + u">"
+        else:
+            return u"Class<" + obj.name + u">"
     else:
         return get_type(obj) + u" doesn't support repr"
 

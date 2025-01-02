@@ -192,44 +192,94 @@ class BStoreLoadList(Bast):
 
 
 class BLiteralHolder:
+    _immutable_fields_ = []
     __slots__ = ()
+
 class BLiteralInt(BLiteralHolder):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
         self.value = const(value)
+    def serialise(self):
+        return serialise_int(self.value, INT_LITERAL_SIZE)
+    def derialise(data):
+        value, data = derialise_int(data, INT_LITERAL_SIZE)
+        return BLiteralInt(value), data
+
 class BLiteralStr(BLiteralHolder):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
         self.value = const_str(value)
+    def serialise(self):
+        return serialise_str(self.value, STR_LITERAL_SIZE)
+    def derialise(data):
+        value, data = derialise_str(data, STR_LITERAL_SIZE)
+        return BLiteralStr(value), data
+
 class BLiteralFunc(BLiteralHolder):
-    _immutable_fields_ = ["env_size", "value", "nargs"]
-    __slots__ = "env_size", "value", "nargs"
-    def __init__(self, env_size, value, nargs):
+    _immutable_fields_ = ["env_size", "value", "nargs", "name"]
+    __slots__ = "env_size", "value", "nargs", "name"
+    def __init__(self, env_size, value, nargs, name):
         assert isinstance(env_size, int), "TypeError"
         assert isinstance(value, int), "TypeError"
         assert isinstance(nargs, int), "TypeError"
+        assert isinstance(name, str), "TypeError"
         self.env_size = const(env_size)
+        self.name = const_str(name)
         self.value = const(value)
         self.nargs = const(nargs)
+    def serialise(self):
+        data = serialise_int(self.env_size, ENV_SIZE_SIZE)
+        data += serialise_int(self.value, FUNC_ID_SIZE)
+        data += serialise_str(self.name, NAME_SIZE)
+        data += serialise_int(self.nargs, REG_SIZE)
+        return data
+    def derialise(data):
+        env_size, data = derialise_int(data, ENV_SIZE_SIZE)
+        value, data = derialise_int(data, FUNC_ID_SIZE)
+        name, data = derialise_str(data, NAME_SIZE)
+        nargs, data = derialise_int(data, REG_SIZE)
+        return BLiteralFunc(env_size, value, nargs, name), data
+
 class BLiteralClass(BLiteralHolder):
-    _immutable_fields_ = ["bases", "label"]
-    __slots__ = "bases", "label"
-    def __init__(self, bases, label):
+    _immutable_fields_ = ["bases", "label", "name"]
+    __slots__ = "bases", "label", "name"
+    def __init__(self, bases, label, name):
         assert isinstance(bases, list), "TypeError"
-        assert isinstance(label, str), "TYpeError"
+        assert isinstance(label, str), "TypeError"
+        assert isinstance(name, str), "TypeError"
         for reg in bases:
             assert isinstance(reg, int), "TypeError"
             assert 0 <= reg < MAX_REG_VALUE, "ValueError"
         self.bases = [const(reg) for reg in bases]
         self.label = const_str(label)
+        self.name = const_str(name)
+    def serialise(self):
+        data = serialise_str(self.label, NAME_SIZE)
+        data += serialise_str(self.name, NAME_SIZE)
+        data += serialise_int(len(self.bases), REG_SIZE)
+        for base in self.bases:
+            data += serialise_int(base, REG_SIZE)
+        return data
+    def derialise(data):
+        label, data = derialise_str(data, NAME_SIZE)
+        name, data = derialise_str(data, NAME_SIZE)
+        nbases, data = derialise_int(data, REG_SIZE)
+        bases = []
+        for _ in range(nbases):
+            base, data = derialise_int(data, REG_SIZE)
+            bases.append(base)
+        return BLiteralClass(bases, label, name), data
+
 class _BLiteralEmpty(BLiteralHolder):
     _immutable_fields_ = []
     __slots__ = ()
     def __init__(self): pass
+    def serialise(self): return b""
+    def derialise(data): return BNONE, data
 
 BNONE = _BLiteralEmpty()
 
@@ -260,24 +310,19 @@ class BLiteral(Bast):
     def serialise(self):
         if self.type == BLiteral.INT_T:
             assert isinstance(self.literal, BLiteralInt), "TypeError"
-            literal = serialise_int(self.literal.value, INT_LITERAL_SIZE)
+            literal = self.literal.serialise()
         elif self.type in (BLiteral.PROC_T, BLiteral.FUNC_T):
             assert isinstance(self.literal, BLiteralFunc), "TypeError"
-            literal = serialise_int(self.literal.env_size, ENV_SIZE_SIZE)
-            literal += serialise_int(self.literal.value, FUNC_ID_SIZE)
-            literal += serialise_int(self.literal.nargs, REG_SIZE)
+            literal = self.literal.serialise()
         elif self.type == BLiteral.STR_T:
             assert isinstance(self.literal, BLiteralStr), "TypeError"
-            literal = serialise_str(self.literal.value, STR_LITERAL_SIZE)
+            literal = self.literal.serialise()
         elif self.type in BLiteral.EMPTY_TS:
             assert self.literal is BNONE, "TypeError"
-            literal = b""
+            literal = self.literal.serialise()
         elif self.type == BLiteral.CLASS_T:
             assert isinstance(self.literal, BLiteralClass), "TypeError"
-            literal = serialise_str(self.literal.label, NAME_SIZE)
-            literal += serialise_int(len(self.literal.bases), REG_SIZE)
-            for base in self.literal.bases:
-                literal += serialise_int(base, REG_SIZE)
+            literal = self.literal.serialise()
         else:
             raise ValueError("InvalidType")
         return serialise_ast_t_id(self.AST_T_ID) + \
@@ -290,26 +335,15 @@ class BLiteral(Bast):
         reg, data = derialise_int(data, REG_SIZE)
         type, data = derialise_int(data, REG_SIZE)
         if type == BLiteral.INT_T:
-            raw_literal, data = derialise_int(data, INT_LITERAL_SIZE)
-            literal = BLiteralInt(raw_literal)
+            literal, data = BLiteralInt.derialise(data)
         elif type in (BLiteral.PROC_T, BLiteral.FUNC_T):
-            env_size, data = derialise_int(data, ENV_SIZE_SIZE)
-            raw_literal, data = derialise_int(data, FUNC_ID_SIZE)
-            raw_nargs, data = derialise_int(data, REG_SIZE)
-            literal = BLiteralFunc(env_size, raw_literal, raw_nargs)
+            literal, data = BLiteralFunc.derialise(data)
         elif type == BLiteral.STR_T:
-            raw_literal, data = derialise_str(data, STR_LITERAL_SIZE)
-            literal = BLiteralStr(raw_literal)
+            literal, data = BLiteralStr.derialise(data)
         elif type in BLiteral.EMPTY_TS:
             literal = BNONE
         elif type == BLiteral.CLASS_T:
-            label, data = derialise_str(data, NAME_SIZE)
-            nbases, data = derialise_int(data, REG_SIZE)
-            bases = []
-            for _ in range(nbases):
-                base, data = derialise_int(data, REG_SIZE)
-                bases.append(base)
-            literal = BLiteralClass(bases, label)
+            literal, data = BLiteralClass.derialise(data)
         else:
             raise ValueError("InvalidType")
         assert isinstance(literal, BLiteralHolder), "TypeError"

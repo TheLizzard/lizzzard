@@ -391,7 +391,7 @@ class ByteCoder:
             if reg > 1:
                 state.free_reg(reg)
 
-    def _convert(self, cmd:Cmd, state:State) -> int:
+    def _convert(self, cmd:Cmd, state:State, name:str="") -> int:
         assert isinstance(cmd, Cmd), "TypeError"
         if not isinstance(cmd, NonLocal):
             state.first_inst:bool = False
@@ -399,8 +399,10 @@ class ByteCoder:
         if isinstance(cmd, Assign):
             for target in cmd.targets:
                 if isinstance(target, Var):
-                    state.write_env(target.identifier)
-            reg:int = self._convert(cmd.value, state)
+                    token:Token = target.identifier
+                    state.write_env(token)
+                    name:str = token.token
+            reg:int = self._convert(cmd.value, state, name=name)
             for target in cmd.targets:
                 if isinstance(target, Var):
                     state.append_bast(BStoreLoadDict(target.identifier.token,
@@ -562,7 +564,8 @@ class ByteCoder:
             # <INSTRUCTIONS>:
             #   res_reg := func_label
             res_reg:int = state.get_free_reg()
-            func_literal:BLiteralFunc = BLiteralFunc(0, func_id, len(cmd.args))
+            func_literal:BLiteralFunc = BLiteralFunc(0, func_id, len(cmd.args),
+                                                     name)
             state.append_bast(BLiteral(res_reg, func_literal, BLiteral.FUNC_T))
             def todo() -> None:
                 # <NEW BODY>:
@@ -646,7 +649,7 @@ class ByteCoder:
             bases:list[Reg] = []
             for base in cmd.bases:
                 bases.append(self._convert(base, state))
-            cls_literal:BLiteralClass = BLiteralClass(bases, label)
+            cls_literal:BLiteralClass = BLiteralClass(bases, label, name)
             state.append_bast(BLiteral(res_reg, cls_literal, BLiteral.CLASS_T))
             for base in bases:
                 state.free_reg(base)
@@ -852,18 +855,25 @@ print(A.X, "should be", 0)
 """[1:-1], False
 
     TEST7 = """
-B = class {}
-
 A = class {
     X = 0
 }
 
-i = 0
-while i < 10000000 {
-    i += 1
-    A.X = B.Y = i
+B = class(A) {
+    Y = 0
 }
-print(A.X==B.Y, A.X)
+
+print(A.X==0, B.X==0, B.Y==0)
+B.X = 1
+print(A.X==1, B.X==1, B.Y==0)
+A.X = 2
+print(A.X==2, B.X==2, B.Y==0)
+print(A, B)
+
+while (B.X < 10_000_000) {
+    B.X += 1
+}
+print(B.X)
 """[1:-1], False
 
     # DEBUG_RAISE:bool = True
