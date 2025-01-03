@@ -132,7 +132,10 @@ class ObjectValue(Value):
     def __init__(self, bases, type, name):
         assert isinstance(bases, list), "TypeError"
         assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
-        assert isinstance(name, str), "TypeError"
+        if type&1:
+            assert name is None, "TypeError"
+        else:
+            assert isinstance(name, str), "TypeError"
         mros = []
         for base in bases:
             assert isinstance(base, ObjectValue), "TypeError"
@@ -243,7 +246,7 @@ def reg_index(regs, idx):
         return ONE
     else:
         value = regs[idx]
-        assert value is not None, "InternalError: trying to load undefined"
+        assert value is not None, "InternalError: trying to load undefined from regs"
         return value
 
 @look_inside
@@ -251,7 +254,23 @@ def reg_store(regs, reg, value):
     assert value is not None, "trying to store undefined inside a register"
     if reg < 1:
         return # Don't store in regs 0 or 1
+    assert reg < const(len(regs)), "InternalError"
     regs[reg] = value
+
+@look_inside
+def env_store(env, idx, value):
+    assert value is not None, "trying to store undefined inside env"
+    if ENV_IS_LIST:
+        assert idx < const(len(env)), "InternalError"
+    env[idx] = value
+
+@look_inside
+def env_load(env, idx):
+    if ENV_IS_LIST:
+        assert idx < const(len(env)), "InternalError"
+    value = env[idx]
+    assert value is not None, "InternalError: trying to load undefined from env"
+    return value
 
 @look_inside
 @elidable # Since teleports is constant we can mark this as elidable
@@ -283,6 +302,24 @@ if ENV_IS_LIST:
 else:
     PREV_ENV_IDX = u"$prev_env"
     ENV_TYPE = Dict
+
+
+class StackFrame:
+    _immutable_fields_ = ["env", "regs", "pc", "ret_reg", "prev_stack"]
+    __slots__ = "env", "regs", "pc", "ret_reg", "prev_stack"
+
+    def __init__(self, env, regs, pc, ret_reg, prev_stack):
+        assert isinstance(env, ENV_TYPE), "TypeError"
+        assert isinstance(regs, list), "TypeError"
+        assert isinstance(pc, int), "TypeError"
+        assert isinstance(ret_reg, int), "TypeError"
+        if prev_stack is not None:
+            assert isinstance(prev_stack, StackFrame), "TypeError"
+        self.env = env
+        self.regs = regs
+        self.pc = pc
+        self.ret_reg = ret_reg
+        self.prev_stack = prev_stack
 
 
 def interpret(flags, frame_size, env_size, attrs, bytecode):
@@ -329,7 +366,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
 
     bytecode = [const(bt) for bt in bytecode]
     pc = 0 # current instruction being executed
-    stack = [] # list[tuple[Env,Regs,Pc,RetReg]]
+    stack = None
 
     next_cls_type = 0
     attr_matrix = [[] for _ in range(len(attrs))]
@@ -349,7 +386,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
 
         elif isinstance(bt, BLoadLink):
             assert not ENV_IS_LIST, "Invalid flag/bytecode"
-            env[bt.name] = LinkValue(bt.link)
+            env_store(env, bt.name, LinkValue(bt.link))
 
         elif isinstance(bt, BStoreLoadDict):
             assert not ENV_IS_LIST, "Invalid flag/bytecode"
@@ -380,14 +417,14 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             # Get the correct scope
             scope = env
             for i in range(bt.link):
-                scope_holder = scope[PREV_ENV_IDX]
+                scope_holder = env_load(scope, PREV_ENV_IDX)
                 assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
                 scope = scope_holder.master
             # Store/Load variable
             if bt.storing:
-                scope[bt.name] = reg_index(regs, bt.reg)
+                env_store(scope, bt.name, reg_index(regs, bt.reg))
             else:
-                reg_store(regs, bt.reg, scope[bt.name])
+                reg_store(regs, bt.reg, env_load(scope, bt.name))
 
         elif isinstance(bt, BDotDict):
             assert not ENV_IS_LIST, "Invalid flag/bytecode"
@@ -401,8 +438,11 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             obj = reg_index(regs, bt.obj_reg)
             if not isinstance(obj, ObjectValue):
                 raise_type_error(u". operator expected Object got " + get_type(obj) + u" instead")
-            # Get cls (the object storing attr) and attr_idx (the idx intocls.attr_vals)
-            mro = hint(obj.mro, promote=True)
+            # Get cls (the object storing attr) and attr_idx (the idx into cls.attr_vals)
+            if bt.storing:
+                mro = [obj]
+            else:
+                mro = hint(obj.mro, promote=True)
             for cls in mro:
                 cls, type = const(cls), const(cls.type)
                 column = hint(attr_matrix[bt.attr], promote=True)
@@ -464,7 +504,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 literal = ObjectValue(bases, class_type, bt_literal.name)
                 reg_store(regs, bt.reg, literal)
                 # Append to stack
-                stack.append((env,regs,pc,bt.reg))
+                stack = StackFrame(env, regs, pc, bt.reg, stack)
                 regs[CLS_REG] = literal
                 tp = teleports_get(teleports, bt_literal.label)
                 assert isinstance(tp, IntValue), "TypeError"
@@ -494,24 +534,25 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
 
         elif isinstance(bt, BRet):
             if bt.capture_env:
-                if len(stack) == 0:
+                if stack is None:
                     raise NotImplementedError("Impossible")
-                _, regs, pc, ret_reg = stack.pop()
+                regs, pc, stack = stack.regs, stack.pc, stack.prev_stack
             else:
                 value = reg_index(regs, bt.reg)
-                if len(stack) == 0:
+                if stack is None:
                     if not isinstance(value, IntValue):
                         raise_type_error(u"exit value should be an int not " + get_type(value))
                     print(u"[EXIT]: " + int_to_str(value.value))
                     break
-                env, regs, pc, ret_reg = stack.pop()
-                reg_store(regs, ret_reg, value)
+                env, regs, pc = stack.env, stack.regs, stack.pc
+                reg_store(regs, stack.ret_reg, value)
+                stack = stack.prev_stack
 
         elif isinstance(bt, BCall):
             args = []
             func = const(reg_index(regs, bt.regs[1]))
             if isinstance(func, ObjectValue) and (func.type&1 == 0):
-                self = ObjectValue([func], func.type+1, func.name)
+                self = ObjectValue([func], func.type+1, None)
                 args = [self]
                 func = const(func.attr_vals[CONSTRUCTOR_IDX])
                 if func is None:
@@ -531,14 +572,15 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             assert isinstance(tp, IntValue), "TypeError"
             tp_value = const(tp.value)
             if tp_value < len(bytecode):
-                stack.append((env,regs,pc,bt.regs[0]))
+                # Create a new stack frame
+                stack = StackFrame(env, regs, pc, bt.regs[0], stack)
                 # Set the pc/regs/env
-                pc, old_regs, regs = tp_value, regs, list(regs)
+                pc, old_regs, regs = tp_value, regs, [None]*const(len(regs))
                 if ENV_IS_LIST:
-                    env = [None]*func.env_size
+                    env = [None]*const(func.env_size)
                 else:
                     env = func.master.copy()
-                env[PREV_ENV_IDX] = func
+                env_store(env, PREV_ENV_IDX, func)
                 # Check number of args
                 if len(bt.regs)-2+len(args) > func.nargs:
                     raise_type_error(u"too many arguments")
@@ -918,10 +960,10 @@ def inner_repr(obj):
     elif isinstance(obj, StrValue):
         return obj.value[1:]
     elif isinstance(obj, FuncValue):
-        string = u"Func<" + obj.name
+        string = u"Func<"
         if obj.bound_obj is not None:
-            string += u" bound to " + inner_repr(obj.bound_obj)
-        string += u">"
+            string += obj.bound_obj.mro[1].name + u"."
+        string += obj.name + u">"
         return string
     elif isinstance(obj, ListValue):
         string = u"["
@@ -932,9 +974,9 @@ def inner_repr(obj):
         return string + u"]"
     elif isinstance(obj, ObjectValue):
         if obj.type & 1:
-            return u"Object<" + obj.name + u">"
+            return u"<Object " + obj.mro[1].name + u">"
         else:
-            return u"Class<" + obj.name + u">"
+            return u"<Class " + obj.name + u">"
     else:
         return get_type(obj) + u" doesn't support repr"
 
@@ -1004,6 +1046,7 @@ if __name__ == "__main__":
 # https://pypy.org/posts/2011/03/controlling-tracing-of-interpreter-with_15-3281215865169782921.html
 # https://web.archive.org/web/20170929153251/https://bitbucket.org/brownan/pypy-tutorial/src/tip/example4.py
 # https://doi.org/10.1016/j.entcs.2016.12.012
-# /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/rlib/jit.py
 # https://eprints.gla.ac.uk/113615/
 # https://www.hpi.uni-potsdam.de/hirschfeld/publications/media/Pape_2021_EfficientCompoundValuesInVirtualMachines_Dissertation.pdf
+# /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/rlib/jit.py
+# https://github.com/pypy/pypy/issues/5166

@@ -868,31 +868,34 @@ A = class {
 
 B = class(A) {
     Y = 0
+    f = func() {}
 }
 
 print(A.X==0, B.X==0, B.Y==0)
 B.X = 1
-print(A.X==1, B.X==1, B.Y==0)
+print(A.X==0, B.X==1, B.Y==0)
 A.X = 2
-print(A.X==2, B.X==2, B.Y==0)
+print(A.X==2, B.X==1, B.Y==0)
 print(A, B)
 
 while (B.X < 10_000_000) {
     B.X += 1
 }
-print(B.X)
+b = B()
+print(b.X)
+print(b, b.f)
 """[1:-1], False
 
     TEST8 = """
-A = class {
-    f = func(self, x) {
-        print(self, x)
-        return self
+g = func() {x = 0}
+
+i = 0
+while i < 10_000_000 {
+    if (i%1 == 0) {
+        g()
     }
+    i += 1
 }
-a = A()
-print(a.f)
-print(a==a.f("abc"))
 """, False
 
     # DEBUG_RAISE:bool = True
