@@ -501,6 +501,7 @@ class BDotList(Bast):
         assert isinstance(reg, int), "TypeError"
         assert 0 <= obj_reg < MAX_REG_VALUE, "ValueError"
         assert 0 <= reg < MAX_REG_VALUE, "ValueError"
+        assert 0 <= attr, "ValueError"
         self.storing = const(storing)
         self.obj_reg = const(obj_reg)
         self.attr = const(attr)

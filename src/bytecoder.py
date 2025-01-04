@@ -392,7 +392,7 @@ class ByteCoder:
             if reg > 1:
                 state.free_reg(reg)
 
-    def _convert(self, cmd:Cmd, state:State, name:str="") -> int:
+    def _convert(self, cmd:Cmd, state:State, name:str="*anonymous*") -> int:
         assert isinstance(cmd, Cmd), "TypeError"
         if not isinstance(cmd, NonLocal):
             state.first_inst:bool = False
@@ -859,31 +859,32 @@ a = A()
 print(a, "should be an object")
 A.X = 6
 a.f()
-"""[1:-1], False
 
-    TEST7 = """
 A = class {
     X = 0
 }
-
 B = class(A) {
     Y = 0
     f = func() {}
 }
-
 print(A.X==0, B.X==0, B.Y==0)
 B.X = 1
 print(A.X==0, B.X==1, B.Y==0)
 A.X = 2
 print(A.X==2, B.X==1, B.Y==0)
-print(A, B)
+print(B.f, "should be an unbound function")
+print(B().f, "should be a bound method")
+"""[1:-1], False
 
-while (B.X < 10_000_000) {
-    B.X += 1
+    TEST7 = """
+A = class {
+    A = B = 0
 }
-b = B()
-print(b.X)
-print(b, b.f)
+A.X = 1
+
+while (A.X < 10_000_000) {
+    A.X += 1
+}
 """[1:-1], False
 
     TEST8 = """

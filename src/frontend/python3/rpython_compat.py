@@ -5,7 +5,7 @@ except ImportError:
 
 
 class JitDriverDummy(object):
-    def __init__(self, greens, reds, get_printable_location):
+    def __init__(self, greens, reds, virtualizables, get_printable_location):
         pass
 
     def jit_merge_point(self, **kwargs):

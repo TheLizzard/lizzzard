@@ -146,9 +146,10 @@ class ObjectValue(Value):
             mros.append(mro)
 
         if ENV_IS_LIST:
-            self.attr_vals = hint([], promote=True)
+            self.attr_vals = [None]
         else:
             self.attr_vals = Dict()
+            self.attr_vals[CONSTRUCTOR_NAME] = None
         self.mro = [self] + self._merge(mros)
         self.name = name
         self.type = type
@@ -289,16 +290,42 @@ def bytecode_debug_str(pc, bt):
     return data
 
 
+class VirtualisableArray:
+    # With help from @cfbolz <https://github.com/pypy/pypy/issues/5166>
+    _immutable_fields_ = ["array"]
+    _virtualizable_ = ["array[*]"]
+    __slots__ = "array"
+
+    def __init__(self, size):
+        self = hint(self, access_directly=True, fresh_virtualizable=True)
+        self.array = [None]*const(size)
+
+    @look_inside
+    def __getitem__(self, key):
+        assert key >= 0, "ValueError"
+        return self.array[key]
+
+    @look_inside
+    def __setitem__(self, key, value):
+        assert key >= 0, "ValueError"
+        self.array[key] = value
+
+    @look_inside
+    @elidable
+    def __len__(self):
+        return const(len(self.array))
+
+
 if USE_JIT:
     def get_location(pc, bytecode, *_):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
-    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens"], get_printable_location=get_location)
+    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens"], virtualizables=["env"], get_printable_location=get_location)
 
 ENV_IS_LIST = True
 if ENV_IS_LIST:
     PREV_ENV_IDX = 0
-    ENV_TYPE = list
+    ENV_TYPE = VirtualisableArray
 else:
     PREV_ENV_IDX = u"$prev_env"
     ENV_TYPE = Dict
@@ -329,7 +356,7 @@ def interpret(flags, frame_size, env_size, attrs, bytecode):
             global PREV_ENV_IDX, ENV_TYPE
             ENV_IS_LIST = flags.is_set("ENV_IS_LIST")
             PREV_ENV_IDX = 0 if ENV_IS_LIST else "$prev_env"
-            ENV_TYPE = list if ENV_IS_LIST else Dict
+            ENV_TYPE = VirtualisableArray if ENV_IS_LIST else Dict
         else:
             if ENV_IS_LIST:
                 print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST but the clizz file wasn't\x1b[0m")
@@ -348,7 +375,7 @@ def interpret(flags, frame_size, env_size, attrs, bytecode):
     regs = [None]*(frame_size+2)
     # Create env
     if ENV_IS_LIST:
-        env = [None]*env_size
+        env = VirtualisableArray(env_size)
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
             env[i] = FuncValue(i+len(bytecode), env, 0, 0, op, None)
@@ -439,33 +466,39 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             if not isinstance(obj, ObjectValue):
                 raise_type_error(u". operator expected Object got " + get_type(obj) + u" instead")
             # Get cls (the object storing attr) and attr_idx (the idx into cls.attr_vals)
-            if bt.storing:
-                mro = [obj]
-            else:
-                mro = hint(obj.mro, promote=True)
-            for cls in mro:
-                cls, type = const(cls), const(cls.type)
-                column = hint(attr_matrix[bt.attr], promote=True)
-                attr_idx = const(column[type])
+            for cls in hint(obj.mro, promote=True):
+                if (cls is not obj) and bt.storing:
+                    continue
+                assert 0 <= bt.attr < len(attr_matrix), "InternalError"
+                column = attr_matrix[bt.attr]
+                assert 0 <= cls.type < len(column), "InternalError"
+                attr_idx = column[cls.type]
                 if attr_idx != -1:
                     break
+            # Create the attr space in cls if attr_idx is -1
             else:
-                cls = const(obj.mro[0])
-                type = const(cls.type)
-                attr_idx, lens[type] = lens[type], lens[type]+1
-                assert attr_idx >= 0, "ValueError"
-                column = hint(attr_matrix[bt.attr], promote=True)
-                column[type] = const(attr_idx)
-                if bt.attr >= len(cls.attr_vals):
-                    cls.attr_vals.extend([None]*(bt.attr-len(cls.attr_vals)+1))
+                cls = obj.mro[0]
+                attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
+                assert 0 <= attr_idx, "InternalError"
+                assert 0 <= bt.attr < len(attr_matrix), "InternalError"
+                column = attr_matrix[bt.attr]
+                assert 0 <= cls.type < len(column), "InternalError"
+                column[cls.type] = attr_idx
+                while attr_idx >= len(cls.attr_vals):
+                    cls.attr_vals.append(None)
             # Use the information above to execute the bytecode
+            attr_idx = const(attr_idx)
+            assert 0 <= attr_idx < len(cls.attr_vals), "InternalError"
             if bt.storing:
                 cls.attr_vals[attr_idx] = reg_index(regs, bt.reg)
             else:
                 value = cls.attr_vals[attr_idx]
-                if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
+                if isinstance(value, FuncValue) and (cls.type&1 == 0) and (obj.type&1) and (value.bound_obj is None):
                     value = value.copy_and_bind(obj)
-                    cls.attr_vals[attr_idx] = value
+                    while attr_idx >= len(obj.attr_vals):
+                        obj.attr_vals.append(None)
+                    assert len(obj.attr_vals) > attr_idx, "InternalError"
+                    obj.attr_vals[attr_idx] = value
                 reg_store(regs, bt.reg, value)
 
         elif isinstance(bt, BLiteral):
@@ -494,11 +527,10 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                     bases.append(reg_index(regs, base))
                 # Register new class
                 class_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
-                for row in attr_matrix:
-                    row.append(-1)
-                    row.append(-1)
-                attr_matrix[0][len(attr_matrix[0])-2] = 0
-                attr_matrix[0][len(attr_matrix[0])-1] = 0
+                for attr, row in enumerate(attr_matrix):
+                    add = 0 if attr == CONSTRUCTOR_IDX else -1
+                    row.append(add)
+                    row.append(add)
                 lens.append(1)
                 lens.append(1)
                 literal = ObjectValue(bases, class_type, bt_literal.name)
@@ -556,6 +588,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 args = [self]
                 func = const(func.attr_vals[CONSTRUCTOR_IDX])
                 if func is None:
+                    # Default constructor
                     reg_store(regs, bt.regs[0], self)
                     continue
                 if not isinstance(func, FuncValue):
@@ -577,7 +610,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 # Set the pc/regs/env
                 pc, old_regs, regs = tp_value, regs, [None]*const(len(regs))
                 if ENV_IS_LIST:
-                    env = [None]*const(func.env_size)
+                    env = VirtualisableArray(func.env_size)
                 else:
                     env = func.master.copy()
                 env_store(env, PREV_ENV_IDX, func)
@@ -587,8 +620,8 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 elif len(bt.regs)-2+len(args) < func.nargs:
                     raise_type_error(u"too few arguments")
                 # Copy arguments values into new regs
-                for i in range(2, len(args)+2):
-                    reg_store(regs, i, args[i-2])
+                for i in range(len(args)):
+                    reg_store(regs, i+2, args[i])
                 for i in range(2, len(bt.regs)):
                     reg_store(regs, i+len(args), reg_index(old_regs, bt.regs[i]))
                 # Tell the JIT compiler about the jump
