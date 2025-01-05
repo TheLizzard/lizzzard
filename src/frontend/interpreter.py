@@ -259,6 +259,7 @@ def reg_store(regs, reg, value):
     regs[reg] = value
 
 @look_inside
+@noargtype(0)
 def env_store(env, idx, value):
     assert value is not None, "trying to store undefined inside env"
     if ENV_IS_LIST:
@@ -266,12 +267,19 @@ def env_store(env, idx, value):
     env[idx] = value
 
 @look_inside
+@noargtype(0)
 def env_load(env, idx):
     if ENV_IS_LIST:
         assert idx < const(len(env)), "InternalError"
     value = env[idx]
     assert value is not None, "InternalError: trying to load undefined from env"
     return value
+
+@look_inside
+def env_extend_until_len(env, new_length):
+    assert isinstance(env, list), "VirtualisableArray can't be extended"
+    while len(env) < new_length:
+        env.append(None)
 
 @look_inside
 @elidable # Since teleports is constant we can mark this as elidable
@@ -320,7 +328,8 @@ if USE_JIT:
     def get_location(pc, bytecode, *_):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
-    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens"], virtualizables=["env"], get_printable_location=get_location)
+    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens"],
+                          virtualizables=["env"], get_printable_location=get_location)
 
 ENV_IS_LIST = True
 if ENV_IS_LIST:
@@ -470,7 +479,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 if (cls is not obj) and bt.storing:
                     continue
                 assert 0 <= bt.attr < len(attr_matrix), "InternalError"
-                column = attr_matrix[bt.attr]
+                column = hint(attr_matrix[bt.attr], promote=True)
                 assert 0 <= cls.type < len(column), "InternalError"
                 attr_idx = column[cls.type]
                 if attr_idx != -1:
@@ -481,24 +490,21 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
                 assert 0 <= attr_idx, "InternalError"
                 assert 0 <= bt.attr < len(attr_matrix), "InternalError"
-                column = attr_matrix[bt.attr]
+                column = hint(attr_matrix[bt.attr], promote=True)
                 assert 0 <= cls.type < len(column), "InternalError"
                 column[cls.type] = attr_idx
-                while attr_idx >= len(cls.attr_vals):
-                    cls.attr_vals.append(None)
+                env_extend_until_len(cls.attr_vals, attr_idx+1)
             # Use the information above to execute the bytecode
             attr_idx = const(attr_idx)
             assert 0 <= attr_idx < len(cls.attr_vals), "InternalError"
             if bt.storing:
-                cls.attr_vals[attr_idx] = reg_index(regs, bt.reg)
+                env_store(cls.attr_vals, attr_idx, reg_index(regs, bt.reg))
             else:
-                value = cls.attr_vals[attr_idx]
+                value = env_load(cls.attr_vals, attr_idx)
                 if isinstance(value, FuncValue) and (cls.type&1 == 0) and (obj.type&1) and (value.bound_obj is None):
                     value = value.copy_and_bind(obj)
-                    while attr_idx >= len(obj.attr_vals):
-                        obj.attr_vals.append(None)
-                    assert len(obj.attr_vals) > attr_idx, "InternalError"
-                    obj.attr_vals[attr_idx] = value
+                    env_extend_until_len(obj.attr_vals, attr_idx+1)
+                    env_store(obj.attr_vals, attr_idx, value)
                 reg_store(regs, bt.reg, value)
 
         elif isinstance(bt, BLiteral):
