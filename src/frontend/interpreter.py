@@ -270,6 +270,8 @@ def env_store(env, idx, value):
 @noargtype(0)
 def env_load(env, idx):
     if ENV_IS_LIST:
+        if not ENV_IS_VIRTUALISABLE:
+            assert isinstance(env, list), "TypeError"
         assert idx < const(len(env)), "InternalError"
     value = env[idx]
     assert value is not None, "InternalError: trying to load undefined from env"
@@ -304,6 +306,7 @@ class VirtualisableArray:
     _virtualizable_ = ["array[*]"]
     __slots__ = "array"
 
+    @look_inside
     def __init__(self, size):
         self = hint(self, access_directly=True, fresh_virtualizable=True)
         self.array = [None]*const(size)
@@ -321,29 +324,38 @@ class VirtualisableArray:
     @look_inside
     @elidable
     def __len__(self):
-        return const(len(self.array))
+        return len(self.array)
 
+
+ENV_IS_LIST = True
+STACK_IS_LIST = False
+ENV_IS_VIRTUALISABLE = True
+
+if ENV_IS_LIST:
+    PREV_ENV_IDX = 0
+    if ENV_IS_VIRTUALISABLE:
+        ENV_TYPE = VirtualisableArray
+    else:
+        ENV_TYPE = list
+else:
+    assert not ENV_IS_VIRTUALISABLE, "Invalid compile settings"
+    PREV_ENV_IDX = u"$prev_env"
+    ENV_TYPE = Dict
 
 if USE_JIT:
     def get_location(pc, bytecode, *_):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
+    virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
     jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens"],
-                          virtualizables=["env"], get_printable_location=get_location)
-
-ENV_IS_LIST = True
-if ENV_IS_LIST:
-    PREV_ENV_IDX = 0
-    ENV_TYPE = VirtualisableArray
-else:
-    PREV_ENV_IDX = u"$prev_env"
-    ENV_TYPE = Dict
+                          virtualizables=virtualizables, get_printable_location=get_location)
 
 
 class StackFrame:
     _immutable_fields_ = ["env", "regs", "pc", "ret_reg", "prev_stack"]
     __slots__ = "env", "regs", "pc", "ret_reg", "prev_stack"
 
+    # @look_inside
     def __init__(self, env, regs, pc, ret_reg, prev_stack):
         assert isinstance(env, ENV_TYPE), "TypeError"
         assert isinstance(regs, list), "TypeError"
@@ -365,7 +377,13 @@ def interpret(flags, frame_size, env_size, attrs, bytecode):
             global PREV_ENV_IDX, ENV_TYPE
             ENV_IS_LIST = flags.is_set("ENV_IS_LIST")
             PREV_ENV_IDX = 0 if ENV_IS_LIST else "$prev_env"
-            ENV_TYPE = VirtualisableArray if ENV_IS_LIST else Dict
+            if ENV_IS_LIST:
+                if ENV_IS_VIRTUALISABLE:
+                    ENV_TYPE = VirtualisableArray
+                else:
+                    ENV_TYPE = list
+            else:
+                ENV_TYPE = Dict
         else:
             if ENV_IS_LIST:
                 print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST but the clizz file wasn't\x1b[0m")
@@ -384,7 +402,10 @@ def interpret(flags, frame_size, env_size, attrs, bytecode):
     regs = [None]*(frame_size+2)
     # Create env
     if ENV_IS_LIST:
-        env = VirtualisableArray(env_size)
+        if ENV_IS_VIRTUALISABLE:
+            env = VirtualisableArray(env_size)
+        else:
+            env = [None]*env_size
         for i, op in enumerate(BUILTINS):
             assert isinstance(op, str), "TypeError"
             env[i] = FuncValue(i+len(bytecode), env, 0, 0, op, None)
@@ -402,10 +423,13 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
 
     bytecode = [const(bt) for bt in bytecode]
     pc = 0 # current instruction being executed
-    stack = None
+    if STACK_IS_LIST:
+        stack = []
+    else:
+        stack = None
 
     next_cls_type = 0
-    attr_matrix = [[] for _ in range(len(attrs))]
+    attr_matrix = hint([], promote=True)
     lens = []
 
     while pc < len(bytecode):
@@ -478,10 +502,10 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             for cls in hint(obj.mro, promote=True):
                 if (cls is not obj) and bt.storing:
                     continue
-                assert 0 <= bt.attr < len(attr_matrix), "InternalError"
-                column = hint(attr_matrix[bt.attr], promote=True)
-                assert 0 <= cls.type < len(column), "InternalError"
-                attr_idx = column[cls.type]
+                assert 0 <= cls.type < len(attr_matrix), "InternalError"
+                row = hint(attr_matrix[cls.type], promote=True)
+                assert 0 <= bt.attr < len(row), "InternalError"
+                attr_idx = row[bt.attr]
                 if attr_idx != -1:
                     break
             # Create the attr space in cls if attr_idx is -1
@@ -489,10 +513,10 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 cls = obj.mro[0]
                 attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
                 assert 0 <= attr_idx, "InternalError"
-                assert 0 <= bt.attr < len(attr_matrix), "InternalError"
-                column = hint(attr_matrix[bt.attr], promote=True)
-                assert 0 <= cls.type < len(column), "InternalError"
-                column[cls.type] = attr_idx
+                assert 0 <= cls.type < len(attr_matrix), "InternalError"
+                row = hint(attr_matrix[cls.type], promote=True)
+                assert 0 <= bt.attr < len(row), "InternalError"
+                row[bt.attr] = attr_idx
                 env_extend_until_len(cls.attr_vals, attr_idx+1)
             # Use the information above to execute the bytecode
             attr_idx = const(attr_idx)
@@ -501,7 +525,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 env_store(cls.attr_vals, attr_idx, reg_index(regs, bt.reg))
             else:
                 value = env_load(cls.attr_vals, attr_idx)
-                if isinstance(value, FuncValue) and (cls.type&1 == 0) and (obj.type&1) and (value.bound_obj is None):
+                if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
                     value = value.copy_and_bind(obj)
                     env_extend_until_len(obj.attr_vals, attr_idx+1)
                     env_store(obj.attr_vals, attr_idx, value)
@@ -533,16 +557,19 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                     bases.append(reg_index(regs, base))
                 # Register new class
                 class_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
-                for attr, row in enumerate(attr_matrix):
-                    add = 0 if attr == CONSTRUCTOR_IDX else -1
-                    row.append(add)
-                    row.append(add)
-                lens.append(1)
-                lens.append(1)
+                for _ in range(2):
+                    row = [-1 for _ in range(len(attrs))]
+                    row = hint(row, promote=True)
+                    row[0] = const(0)
+                    attr_matrix.append(row)
+                lens.extend([1,1])
                 literal = ObjectValue(bases, class_type, bt_literal.name)
                 reg_store(regs, bt.reg, literal)
                 # Append to stack
-                stack = StackFrame(env, regs, pc, bt.reg, stack)
+                if STACK_IS_LIST:
+                    stack.append((env,regs,pc,bt.reg))
+                else:
+                    stack = StackFrame(env, regs, pc, bt.reg, stack)
                 regs[CLS_REG] = literal
                 tp = teleports_get(teleports, bt_literal.label)
                 assert isinstance(tp, IntValue), "TypeError"
@@ -572,19 +599,27 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
 
         elif isinstance(bt, BRet):
             if bt.capture_env:
-                if stack is None:
+                if not stack:
                     raise NotImplementedError("Impossible")
-                regs, pc, stack = stack.regs, stack.pc, stack.prev_stack
+                if STACK_IS_LIST:
+                    _, regs, pc, ret_reg = stack.pop()
+                else:
+                    regs, pc, stack = stack.regs, stack.pc, stack.prev_stack
             else:
                 value = reg_index(regs, bt.reg)
-                if stack is None:
+                if not stack:
                     if not isinstance(value, IntValue):
                         raise_type_error(u"exit value should be an int not " + get_type(value))
                     print(u"[EXIT]: " + int_to_str(value.value))
                     break
-                env, regs, pc = stack.env, stack.regs, stack.pc
-                reg_store(regs, stack.ret_reg, value)
-                stack = stack.prev_stack
+                if STACK_IS_LIST:
+                    env, regs, pc, ret_reg = stack.pop()
+                    reg_store(regs, ret_reg, value)
+                else:
+                    env, regs, pc = stack.env, stack.regs, stack.pc
+                    reg_store(regs, stack.ret_reg, value)
+                    stack = stack.prev_stack
+            # env, regs, stack = hint(env, promote=True), hint(regs, promote=True), hint(stack, promote=True)
 
         elif isinstance(bt, BCall):
             args = []
@@ -612,11 +647,17 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             tp_value = const(tp.value)
             if tp_value < len(bytecode):
                 # Create a new stack frame
-                stack = StackFrame(env, regs, pc, bt.regs[0], stack)
+                if STACK_IS_LIST:
+                    stack.append((env,regs,pc,bt.regs[0]))
+                else:
+                    stack = StackFrame(env, regs, pc, bt.regs[0], stack)
                 # Set the pc/regs/env
                 pc, old_regs, regs = tp_value, regs, [None]*const(len(regs))
                 if ENV_IS_LIST:
-                    env = VirtualisableArray(func.env_size)
+                    if ENV_IS_VIRTUALISABLE:
+                        env = VirtualisableArray(func.env_size)
+                    else:
+                        env = [None]*func.env_size
                 else:
                     env = func.master.copy()
                 env_store(env, PREV_ENV_IDX, func)

@@ -34,7 +34,7 @@ class Regs:
     def __init__(self, parent:Regs=None) -> Regs:
         self._taken:list[bool] = [True,True] # 0,1
         self._parent:Regs = parent
-        self.max_reg:int = 3
+        self.max_reg:int = 2
 
     def get_free_reg(self) -> int:
         for idx, taken in enumerate(self._taken):
@@ -110,7 +110,18 @@ class State:
 
     @property
     def full_env(self) -> Env:
-        return BUILTIN_HELPERS + self.env + sorted(list(self.not_env))
+        return self._add_lists(BUILTIN_HELPERS, self.env,
+                               sorted(list(self.not_env)))
+
+    def _add_lists(self, *arrays:tuple[list[object]]) -> list[object]:
+        output:list[object] = []
+        seen:set[object] = set()
+        for array in arrays:
+            for element in array:
+                if element not in seen:
+                    output.append(element)
+                    seen.add(element)
+        return output
 
     # Copy helpers
     def _for_block(self) -> tuple[Nonlocals,State]:
@@ -187,8 +198,7 @@ class State:
         assert isinstance(name_token, Token), "TypeError"
         assert isinstance(reg, int), "TypeError"
         assert reg > 1, "ValueError"
-        if self.must_end_loop: return None
-        if self.must_ret: return None
+        if self.must_end_loop or self.must_ret: return
         state:State = self
         while state is not None:
             name:str = state._guard_env(name_token)
@@ -250,6 +260,7 @@ class State:
 
     def clear_reg(self, reg:int) -> None:
         assert isinstance(reg, int), "TypeError"
+        if self.must_ret: return
         if self.flags.is_set("CLEAR_AFTER_USE"):
             self.regs.clear_reg(reg, self.block)
 
@@ -330,6 +341,19 @@ class State:
                                           f"No teporary variables are " \
                                           f"allowed in a class scope")
 
+    def fransform_block(self) -> None:
+        fransformed_block:Block = Block()
+        must_ret:bool = False
+        for bt in self.block:
+            if isinstance(bt, BRet):
+                fransformed_block.append(bt)
+                must_ret:bool = True
+            elif isinstance(bt, Bable):
+                must_ret:bool = False
+            if not must_ret:
+                fransformed_block.append(bt)
+        self.block[:] = fransformed_block
+
 
 class Block(list[Bast]):
     __slots__ = ()
@@ -350,20 +374,23 @@ class ByteCoder:
         self.ast:Body = ast
 
     def _to_bytecode(self) -> tuple[int,int,list[str],list[Block]]:
-        state:State = State.new(self._flags)
-        self._states:list[State] = [state]
+        main_state:State = State.new(self._flags)
+        self._states:list[State] = [main_state]
         self._labels.reset()
         for cmd in self.ast:
-            reg:int = self._convert(cmd, state)
-            state.free_reg(reg)
-        with state.get_free_reg_wrapper() as tmp_reg:
-            state.append_bast(BLiteral(tmp_reg, BLiteralInt(0), BLiteral.INT_T))
-            state.append_bast(BRet(tmp_reg, False))
-        state.fransform_func()
+            reg:int = self._convert(cmd, main_state)
+            main_state.free_reg(reg)
+        with main_state.get_free_reg_wrapper() as tmp_reg:
+            main_state.append_bast(BLiteral(tmp_reg, BLiteralInt(0),
+                                            BLiteral.INT_T))
+            main_state.append_bast(BRet(tmp_reg, False))
+        main_state.fransform_func()
         while self._todo:
             self._todo.pop(0)()
-        return state.regs.max_reg+1, len(state.full_env), state.attrs, \
-               state.blocks
+        for state in self._states:
+            state.fransform_block()
+        return main_state.regs.max_reg+1, len(main_state.full_env), \
+               main_state.attrs, main_state.blocks
 
     def to_bytecode(self) -> tuple[RegsSize,EnvSize,list[str],list[Block]]:
         try:
@@ -581,12 +608,16 @@ class ByteCoder:
                     token:Token = arg.identifier
                     nstate.write_env(token)
                     nstate.append_bast(BStoreLoadDict(token.token, i, True))
-                for subcmd in cmd.body:
+                for i, subcmd in enumerate(cmd.body):
                     tmp_reg:int = self._convert(subcmd, nstate)
+                    # If last cmd is an Expr, return it
+                    if (i == len(cmd.body)-1) and isinstance(subcmd, Expr):
+                        nstate.append_bast(BRet(tmp_reg, False))
                     nstate.free_reg(tmp_reg)
-                reg:int = nstate.get_free_reg()
-                nstate.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
-                nstate.append_bast(BRet(reg, False))
+                if not nstate.must_ret:
+                    reg:int = nstate.get_free_reg()
+                    nstate.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
+                    nstate.append_bast(BRet(reg, False))
                 nstate.fransform_func()
                 func_literal.env_size = len(nstate.full_env)
             # Convert the Func to bytecode after the rest of the code in the
@@ -684,11 +715,11 @@ print("The following should be all 1s/`true`s")
 
 f = func(x){
     g = func(){return x}
-    return g
+    g
 }
 c = func(f){
     x = y = g = 0
-    return f()
+    f()
 }
 x = 5
 y = 2
@@ -730,7 +761,7 @@ tmp = func(){
             func(a){a()}(h)
            }(g)
     func(h){h()}(g)
-    return [g, (func(){nonlocal x; return x})]
+    return [g, (func(){nonlocal x; x})]
 }()
 add = tmp[0]
 get = tmp[1]
@@ -740,13 +771,11 @@ print(2, "\t", 25==x, get()+5==30)
 
 
 Y = func(f){
-    return func(x){
-        return f(f(f(f(f(f(f(f)))))))(x)
-    }
+    return func(x){ f(f(f(f(f(f(f(f)))))))(x) }
 }
 fact_helper = func(rec){
     return func(n){
-        return 1 if n == 0 else n*rec(n-1)
+        1 if n == 0 else n*rec(n-1)
     }
 }
 fact = Y(fact_helper)
@@ -895,6 +924,16 @@ while i < 10_000_000 {
     if (i%1 == 0) {
         g()
     }
+    i += 1
+}
+""", False
+
+    TEST9 = """
+f = func() {}
+
+i = 0
+while (i < 10_000_000) {
+    f()
     i += 1
 }
 """, False
