@@ -329,11 +329,12 @@ class VirtualisableArray:
 
 ENV_IS_LIST = True
 STACK_IS_LIST = False
-ENV_IS_VIRTUALISABLE = True
+ENV_IS_VIRTUALISABLE = False
 
 if ENV_IS_LIST:
     PREV_ENV_IDX = 0
     if ENV_IS_VIRTUALISABLE:
+        raise NotImplementedError("Very unsafe - `fib` break if VirtualisableArray is used. More info in version 1.3.5 commit message")
         ENV_TYPE = VirtualisableArray
     else:
         ENV_TYPE = list

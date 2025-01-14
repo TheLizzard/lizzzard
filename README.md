@@ -4,7 +4,7 @@ Functional language with rpython's tracing JIT compiler
 # Implemented
 | Feature        | Lexer | Parser | IR1 | Semantic analyser | IR2 | Interpreter |
 | :------------- | ----: | -----: | --: | ----------------: | --: | ----------: |
-| BasicOp        |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ? |
+| BasicOp        |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | Func           |     ✔ |      ✔ |     |                   |   ✔ |           - |
 | Proc           |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | Class          |     ✔ |      ✔ |     |                   |     |             |
@@ -39,12 +39,10 @@ Functional language with rpython's tracing JIT compiler
 
 
 # Missing from interpreter
-* classes/records (requires object model)
 * match/case (requires records)
 * destructuring assignment (requires object model)
 * for loops (requires object model)
 * dict/set/bool (requires object model - will be implemented inside lizzzard)
-* short-circuit evaluation for `and` and `or`
 * error messages inside the interpreter
 * variable capture for func/proc/partial (still thinking about it)
 
@@ -56,4 +54,4 @@ Functional language with rpython's tracing JIT compiler
 
 # Interpreter speed improvements
 * a bytecode optimiser should be able to cut the number of instructions by ~15% but the speed increase might be negligible
-* optimise away useless operations after JIT (requires more experiments/rpython stackoverflow question)
+* optimise away useless operations after JIT (pypy issue #5166)

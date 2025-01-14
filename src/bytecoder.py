@@ -520,6 +520,23 @@ class ByteCoder:
                 obj_reg:int = self._convert(cmd.args[0], state)
                 state.append_bast(BDotDict(obj_reg, attr, res_reg, False))
                 state.free_reg(obj_reg)
+            elif cmd.op in ("and", "or"):
+                # Set up
+                res_reg:int = state.get_free_reg()
+                or_id:int = self._labels.get_fl()
+                negate_if:bool = cmd.op == "and"
+                label_or:Bable = Bable(f"or_{or_id}")
+                # Arg 1
+                tmp_reg:int = self._convert(cmd.args[0], state)
+                state.append_bast(BRegMove(res_reg, tmp_reg))
+                state.append_bast(BJump(label_or.id, tmp_reg, negate_if))
+                state.free_reg(tmp_reg)
+                # Arg 2
+                tmp_reg:int = self._convert(cmd.args[1], state)
+                state.append_bast(BRegMove(res_reg, tmp_reg))
+                state.free_reg(tmp_reg)
+                # End
+                state.append_bast(label_or)
             else:
                 res_reg:int = state.get_free_reg()
                 used_regs:list[int] = []
@@ -813,6 +830,11 @@ iseven = func(x) {
 print(3, "\t", 200==add(120,80), 200==add120(80), 200==add80(60))
 print(6, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
       isodd(1), iseven(0))
+
+
+⊥ = func(){⊥()}
+print(5, "\t", (5 or ⊥())==5, (0 or 1)==1, (1 and 2)==2, (0 and ⊥())==0,
+               (1 and 0)==0)
 """[1:-1], False
 
     TEST2 = """

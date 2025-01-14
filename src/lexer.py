@@ -310,7 +310,7 @@ class Tokeniser:
                    [Token("\n", stamp, TokenType.OTHER)]
         elif token in "\t ":
             assert self.under.read(1) == token, "Never fails"
-        elif token.isidentifier():
+        elif token.isidentifier() or (token == "⊥"):
             ident:Token = self.read_identifier()
             if self.under.peek(1) in ("'", '"'):
                 ret:Token = self.read_string(ident.token, type_stamp=stamp)
@@ -409,10 +409,11 @@ class Tokeniser:
         stamp:Stamp = self.under.stamp()
         while True:
             token += self.under.read(1)
-            ntoken:str = token + self.under.peek(1)
-            if not ntoken.isidentifier():
+            char:str = self.under.peek(1)
+            if not char:
                 break
-            if token == ntoken:
+            ntoken:str = token + char
+            if (not ntoken.isidentifier()) and char.isascii():
                 break
         return Token(token, stamp, TokenType.IDENTIFIER)
 
