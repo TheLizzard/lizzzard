@@ -5,10 +5,10 @@ Functional language with rpython's tracing JIT compiler
 | Feature        | Lexer | Parser | IR1 | Semantic analyser | IR2 | Interpreter |
 | :------------- | ----: | -----: | --: | ----------------: | --: | ----------: |
 | BasicOp        |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
-| Func           |     ✔ |      ✔ |     |                   |   ✔ |           - |
+| Func           |     ✔ |      ✔ |     |                   |   - |           - |
 | Proc           |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
-| Class          |     ✔ |      ✔ |     |                   |     |             |
-| Record         |     ✔ |      ✔ |     |                   |     |             |
+| Class          |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| Record         |     ✔ |      ✔ |     |                   |   - |           - |
 | Assginment     |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | Variables      |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
 | IfExpr         |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
@@ -34,7 +34,7 @@ Functional language with rpython's tracing JIT compiler
 | None     |     ✔ |      ✔ |  ✔ |           ✔ |
 | List     |     ✔ |      ✔ |  ✔ |           ✔ |
 | Tuples   |     ✔ |      ✔ |    |             |
-| Class    |     ✔ |      ✔ |    |             |
+| Class    |     ✔ |      ✔ |  ✔ |           ✔ |
 | Dict/Set |     ✔ |      ✔ |    |             |
 
 

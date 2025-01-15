@@ -726,10 +726,11 @@ class ByteCoder:
 
 
 if __name__ == "__main__":
-    TEST1 = """
+    TEST1 = r"""
 print("The following should be all 1s/`true`s")
 
 
+print("####### General stuff ########")
 f = func(x){
     g = func(){return x}
     g
@@ -767,6 +768,7 @@ append(x, 20)
 print(2, "\t", 15==x[1], 20==x[3])
 
 
+print("########## Closures ##########")
 x = 21
 tmp = func(){
     nonlocal x
@@ -799,6 +801,7 @@ fact = Y(fact_helper)
 print(1, "\t", 120==fact(5))
 
 
+print("########### Lists ############")
 x = [1, 2, 3, 4, 5]
 a = x[:2]
 b = x[2:]
@@ -827,14 +830,73 @@ iseven = func(x) {
     return isodd(x-1)
 }
 
+print("####### Partial funcs ########")
 print(3, "\t", 200==add(120,80), 200==add120(80), 200==add80(60))
+print("###### Mutual recursion ######")
 print(6, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
       isodd(1), iseven(0))
 
 
+print("#### And/Or short-circuit ####")
 ⊥ = func(){⊥()}
 print(5, "\t", (5 or ⊥())==5, (0 or 1)==1, (1 and 2)==2, (0 and ⊥())==0,
                (1 and 0)==0)
+
+
+print("######## Object model ########")
+unbounded_funcs = []
+bounded_funcs = []
+classes = []
+objects = []
+
+t = 0
+A = class {
+    nonlocal t
+    X = 5
+    f = func(self) {
+        nonlocal t
+        if (self != 7) {
+            append(objects, self)
+        } else {
+            append(classes, A)
+        }
+        print(1, "\t", A.X==6)
+        t = A.X + 2
+        A.X = 0
+    }
+    t = X
+    if X {a=0}
+}
+print(1, "\t", t==5)
+A.X = 6
+A.f(7)
+print(2, "\t", t==8, A.X==0)
+
+a = A()
+append(objects, a)
+A.X = 6
+a.f()
+
+A = class {
+    X = 0
+}
+B = class(A) {
+    Y = 0
+    f = func() {}
+}
+append(unbounded_funcs, B.f)
+append(bounded_funcs, B().f)
+
+print(3, "\t", A.X==0, B.X==0, B.Y==0)
+B.X = 1
+print(3, "\t", A.X==0, B.X==1, B.Y==0)
+A.X = 2
+print(3, "\t", A.X==2, B.X==1, B.Y==0)
+
+print("These should be classes:\t\t", classes)
+print("These should be instances:\t\t", objects)
+print("These should be unbounded functions:\t", unbounded_funcs)
+print("These should be bounded functions:\t", bounded_funcs)
 """[1:-1], False
 
     TEST2 = """
@@ -844,16 +906,10 @@ fib = func(x) ->
     return fib(x-2) + fib(x-1)
 print(fib(15), "should be", 1597)
 print(fib(30), "should be", 2178309)
+print("cpython takes 0.221 sec")
 """[1:-1], True
 
     TEST3 = """
-i = 0
-while i < 10_000_000 ->
-    i += 1
-print(i)
-"""[1:-1], True
-
-    TEST4 = """
 max = 10_000
 primes = [2]
 i = 2
@@ -872,7 +928,16 @@ while (i < max){
 print("the number of primes bellow", max, "is:", len(primes),
       "which should be", 1229)
 print("the last prime is:", primes[-1], "which should be", 9973)
+print("cpython takes 0.373 sec")
 """[1:-1], False
+
+    TEST4 = """
+i = 0
+while i < 10_000_000 ->
+    i += 1
+print("while++", i)
+print("cpython takes 0.233 sec")
+"""[1:-1], True
 
     TEST5 = """
 f = func(x){
@@ -881,87 +946,28 @@ f = func(x){
     }
     return x
 }
-print(f(100_000), "should be", 100_000)
+print("rec++", f(1_000_000))
+print("cpython takes 0.201 sec")
 """[1:-1], False
 
     TEST6 = """
-t = 0
-A = class {
-    nonlocal t
-    X = 5
-    f = func(self) {
-        nonlocal t
-        print(self, "should be", "7" if self == 7 else "an instance")
-        print(A.X, "should be", 6)
-        print(A, "should be a class")
-        t = A.X + 2
-        A.X = 0
-    }
-    t = X
-    if X {a=0}
-}
-print(t, "should be", 5)
-A.X = 6
-A.f(7)
-print(t, "should be", 8)
-print(A.X, "should be", 0)
-
-a = A()
-print(a, "should be an object")
-A.X = 6
-a.f()
-
-A = class {
-    X = 0
-}
-B = class(A) {
-    Y = 0
-    f = func() {}
-}
-print(A.X==0, B.X==0, B.Y==0)
-B.X = 1
-print(A.X==0, B.X==1, B.Y==0)
-A.X = 2
-print(A.X==2, B.X==1, B.Y==0)
-print(B.f, "should be an unbound function")
-print(B().f, "should be a bound method")
-"""[1:-1], False
-
-    TEST7 = """
+f = func() {}
 A = class {
     A = B = 0
 }
 A.X = 1
 
 while (A.X < 10_000_000) {
+    f()
     A.X += 1
 }
+
+print("attr++", A.X)
+print("cpython takes 1.476 sec")
 """[1:-1], False
 
-    TEST8 = """
-g = func() {x = 0}
-
-i = 0
-while i < 10_000_000 {
-    if (i%1 == 0) {
-        g()
-    }
-    i += 1
-}
-""", False
-
-    TEST9 = """
-f = func() {}
-
-i = 0
-while (i < 10_000_000) {
-    f()
-    i += 1
-}
-""", False
-
     # DEBUG_RAISE:bool = True
-    # 1:all, 2:fib, 3:while++, 4:primes, 5:rec++, 6:cls
+    # 1:all, 2:fib, 3:primes, 4:while++, 5:rec++, 6:attr++
     TEST = TEST1
     assert not isinstance(TEST, str), "TEST should be tuple[str,bool]"
     ast:Body = Parser(Tokeniser(StringIO(TEST[0])), colon=TEST[1]).read()
@@ -993,5 +999,6 @@ while (i < 10_000_000) {
                 assert env_size == dec_env_size, "AssertionError"
                 assert attrs == dec_attrs, "AssertionError"
 
+    # from time import perf_counter
     # fib = lambda x: 1 if x < 1 else fib(x-2)+fib(x-1)
-    # print(fib(30))
+    # s = perf_counter(); fib(15); fib(30); perf_counter()-s

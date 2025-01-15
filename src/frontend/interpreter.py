@@ -25,9 +25,6 @@ class IntValue(Value):
         assert isinstance(value, int), "TypeError"
         self.value = value
 
-    def __repr__(self):
-        return u"IntValue[" + int_to_str(self.value) + u"]"
-
 BoolValue = IntValue
 
 
@@ -38,9 +35,6 @@ class StrValue(Value):
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
         self.value = value
-
-    def __repr__(self):
-        return u"StrValue[" + self.value + u"]"
 
 
 class FuncValue(Value):
@@ -62,13 +56,6 @@ class FuncValue(Value):
         self.name = name
         self.tp = tp
 
-    def __repr__(self):
-        return u"func"
-
-    def copy_and_bind(self, obj):
-        assert isinstance(obj, ObjectValue), "TypeError"
-        return FuncValue(self.tp, self.master, self.env_size, self.nargs, self.name, obj)
-
 
 class LinkValue(Value):
     _immutable_fields_ = ["link"]
@@ -78,9 +65,6 @@ class LinkValue(Value):
         assert isinstance(link, int), "TypeError"
         assert link > 0, "ValueError"
         self.link = link
-
-    def __repr__(self):
-        return u"link[" + int_to_str(self.link) + "]"
 
 
 class ListValue(Value):
@@ -125,65 +109,21 @@ class NoneValue(Value):
 
 
 class ObjectValue(Value):
-    _immutable_fields_ = ["mro", "attr_vals", "type", "name"]
-    __slots__ = "mro", "attr_vals", "type", "name"
+    _immutable_fields_ = ["attr_vals", "type", "name"]
+    __slots__ = "attr_vals", "type", "name"
 
     @look_inside
-    def __init__(self, bases, type, name):
-        assert isinstance(bases, list), "TypeError"
+    def __init__(self, type, name):
         assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
-        if type&1:
-            assert name is None, "TypeError"
-        else:
-            assert isinstance(name, str), "TypeError"
-        mros = []
-        for base in bases:
-            assert isinstance(base, ObjectValue), "TypeError"
-            mro = base.mro
-            assert isinstance(mro, list), "TypeError"
-            for cls in mro:
-                assert isinstance(cls, ObjectValue), "TypeError"
-            mros.append(mro)
+        assert isinstance(name, str), "TypeError"
 
         if ENV_IS_LIST:
             self.attr_vals = [None]
         else:
             self.attr_vals = Dict()
             self.attr_vals[CONSTRUCTOR_NAME] = None
-        self.mro = [self] + self._merge(mros)
+        self.type = const(type)
         self.name = name
-        self.type = type
-
-    @look_inside
-    def _merge(self, mros):
-        # Stolen from: https://stackoverflow.com/a/54261655/11106801
-        if len(mros) == 0:
-            return []
-        for mro in mros:
-            assert isinstance(mro, list), "TypeError"
-            for cls in mro:
-                assert isinstance(cls, ObjectValue), "TypeError"
-        for mro in mros:
-            candidate = mro[0]
-            failed = False
-            for mro in mros:
-                if failed: break
-                for tail in mro[1:]:
-                    if tail == candidate:
-                        failed = True
-                        break
-            if not failed:
-                tails = []
-                for mro in mros:
-                    if mro[0] is candidate:
-                        if len(mro) > 1:
-                            tails.append(mro[1:])
-                        continue
-                    tails.append(mro)
-                return [candidate] + self._merge(tails)
-                # return [candidate] + self._merge([tail if head is candidate else [head, *tail]
-                #                             for head, *tail in mros])
-        raise_type_error(u"No legal mro")
 
     def __repr__(self):
         return u"object"
@@ -292,6 +232,43 @@ def teleports_get(teleports, label):
     result = const(result)
     return result
 
+@look_inside
+def copy_and_bind_func(func, obj):
+    assert isinstance(func, FuncValue), "TypeError"
+    assert isinstance(obj, ObjectValue), "TypeError"
+    return FuncValue(func.tp, func.master, func.env_size, func.nargs, func.name, obj)
+
+@look_inside
+def _c3_merge(mros):
+    # Stolen from: https://stackoverflow.com/a/54261655/11106801
+    if len(mros) == 0:
+        return []
+    for mro in mros:
+        assert isinstance(mro, list), "TypeError"
+        for cls in mro:
+            assert isinstance(cls, ObjectValue), "TypeError"
+    for mro in mros:
+        candidate = mro[0]
+        failed = False
+        for mro in mros:
+            if failed: break
+            for tail in mro[1:]:
+                if tail == candidate:
+                    failed = True
+                    break
+        if not failed:
+            tails = []
+            for mro in mros:
+                if mro[0] is candidate:
+                    if len(mro) > 1:
+                        tails.append(mro[1:])
+                    continue
+                tails.append(mro)
+            return [candidate] + _c3_merge(tails)
+            # return [candidate] + _c3_merge([tail if head is candidate else [head, *tail] for head, *tail in mros])
+    raise_type_error(u"No legal mro")
+
+
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
     data = bytes2(data_unicode)
@@ -348,7 +325,7 @@ if USE_JIT:
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
     virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
-    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens"],
+    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["CLEAR_AFTER_USE","next_cls_type","stack","env","regs","attr_matrix","attrs","lens","mros"],
                           virtualizables=virtualizables, get_printable_location=get_location)
 
 
@@ -431,12 +408,13 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
 
     next_cls_type = 0
     attr_matrix = hint([], promote=True)
-    lens = []
+    lens = hint([], promote=True)
+    mros = hint([], promote=True)
 
     while pc < len(bytecode):
         if USE_JIT:
             jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
-                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens)
+                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
             debug(str(bytecode_debug_str(pc, bt)), 3)
@@ -480,7 +458,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             for i in range(bt.link):
                 scope_holder = env_load(scope, PREV_ENV_IDX)
                 assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
-                scope = scope_holder.master
+                scope = hint(scope_holder.master, promote=True)
             # Store/Load variable
             if bt.storing:
                 env_store(scope, bt.name, reg_index(regs, bt.reg))
@@ -500,7 +478,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             if not isinstance(obj, ObjectValue):
                 raise_type_error(u". operator expected Object got " + get_type(obj) + u" instead")
             # Get cls (the object storing attr) and attr_idx (the idx into cls.attr_vals)
-            for cls in hint(obj.mro, promote=True):
+            for cls in hint(mros[const(obj.type)], promote=True):
                 if (cls is not obj) and bt.storing:
                     continue
                 assert 0 <= cls.type < len(attr_matrix), "InternalError"
@@ -511,7 +489,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                     break
             # Create the attr space in cls if attr_idx is -1
             else:
-                cls = obj.mro[0]
+                cls = obj
                 attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
                 assert 0 <= attr_idx, "InternalError"
                 assert 0 <= cls.type < len(attr_matrix), "InternalError"
@@ -527,7 +505,9 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             else:
                 value = env_load(cls.attr_vals, attr_idx)
                 if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
-                    value = value.copy_and_bind(obj)
+                    value = copy_and_bind_func(value, obj)
+                    attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
+                    attr_matrix[obj.type][bt.attr] = attr_idx
                     env_extend_until_len(obj.attr_vals, attr_idx+1)
                     env_store(obj.attr_vals, attr_idx, value)
                 reg_store(regs, bt.reg, value)
@@ -553,18 +533,22 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             elif bt.type == BLiteral.CLASS_T:
                 assert isinstance(bt_literal, BLiteralClass), "TypeError"
                 # Create ObjectValue type
-                bases = []
-                for base in bt_literal.bases:
-                    bases.append(reg_index(regs, base))
+                _mros = []
+                for base_reg in bt_literal.bases:
+                    base = reg_index(regs, base_reg)
+                    assert isinstance(base, ObjectValue), "TypeError"
+                    _mros.append(mros[base.type])
                 # Register new class
-                class_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
+                cls_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
                 for _ in range(2):
                     row = [-1 for _ in range(len(attrs))]
                     row = hint(row, promote=True)
                     row[0] = const(0)
                     attr_matrix.append(row)
                 lens.extend([1,1])
-                literal = ObjectValue(bases, class_type, bt_literal.name)
+                literal = ObjectValue(cls_type, bt_literal.name)
+                while len(mros) <= literal.type: mros.append([])
+                mros[literal.type] = hint([literal]+_c3_merge(_mros), promote=True)
                 reg_store(regs, bt.reg, literal)
                 # Append to stack
                 if STACK_IS_LIST:
@@ -593,7 +577,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 assert isinstance(bytecode[pc], Bable), "InternalError"
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
-                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens)
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros)
 
         elif isinstance(bt, BRegMove):
             reg_store(regs, bt.reg1, reg_index(regs, bt.reg2))
@@ -626,7 +610,9 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             args = []
             func = const(reg_index(regs, bt.regs[1]))
             if isinstance(func, ObjectValue) and (func.type&1 == 0):
-                self = ObjectValue([func], func.type+1, None)
+                self = ObjectValue(func.type+1, func.name)
+                while len(mros) <= self.type: mros.append([])
+                mros[self.type] = hint([self]+mros[func.type], promote=True)
                 args = [self]
                 func = const(func.attr_vals[CONSTRUCTOR_IDX])
                 if func is None:
@@ -675,7 +661,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 # Tell the JIT compiler about the jump
                 if USE_JIT:
                     jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
-                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens)
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros)
             else: # Built-ins
                 op_idx = tp_value - len(bytecode) - len(BUILTIN_HELPERS)
                 pure_op = op_idx < len(BUILTIN_OPS)
@@ -708,7 +694,6 @@ def builtin_pure(op, args, op_print):
 
 @look_inside
 def builtin_pure_list(op, args, op_print):
-    assert len(args) > 0, "InternalError"
     if op == u"+":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
@@ -1043,7 +1028,7 @@ def inner_repr(obj):
     elif isinstance(obj, FuncValue):
         string = u"Func<"
         if obj.bound_obj is not None:
-            string += obj.bound_obj.mro[1].name + u"."
+            string += obj.bound_obj.name + u"."
         string += obj.name + u">"
         return string
     elif isinstance(obj, ListValue):
@@ -1055,7 +1040,7 @@ def inner_repr(obj):
         return string + u"]"
     elif isinstance(obj, ObjectValue):
         if obj.type & 1:
-            return u"<Object " + obj.mro[1].name + u">"
+            return u"<Object " + obj.name + u">"
         else:
             return u"<Class " + obj.name + u">"
     else:

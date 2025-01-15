@@ -716,9 +716,9 @@ def serialise(flags, frame_size, env_size, attrs, bytecode):
              serialise_int(frame_size, FRAME_SIZE)
     if flags.is_set("ENV_IS_LIST"):
         output += serialise_int(env_size, ENV_SIZE_SIZE)
-        output += serialise_int(len(attrs), ATTR_SIZE_SIZE)
-        for attr in attrs:
-            output += serialise_str(attr, NAME_SIZE)
+    output += serialise_int(len(attrs), ATTR_SIZE_SIZE)
+    for attr in attrs:
+        output += serialise_str(attr, NAME_SIZE)
     return output + bytecode
 
 def derialise(data):
@@ -730,12 +730,12 @@ def derialise(data):
     attrs = []
     if flags.is_set("ENV_IS_LIST"):
         env_size, data = derialise_int(data, ENV_SIZE_SIZE)
-        attrs_size, data = derialise_int(data, ATTR_SIZE_SIZE)
-        for _ in range(attrs_size):
-            attr, data = derialise_str(data, NAME_SIZE)
-            attrs.append(attr)
     else:
-        env_size, attrs = 0, []
+        env_size = 0
+    attrs_size, data = derialise_int(data, ATTR_SIZE_SIZE)
+    for _ in range(attrs_size):
+        attr, data = derialise_str(data, NAME_SIZE)
+        attrs.append(attr)
     bytecode = []
     while data:
         ast_t_id, _ = derialise_ast_t_id(data)
