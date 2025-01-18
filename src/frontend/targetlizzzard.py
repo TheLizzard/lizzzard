@@ -7,6 +7,8 @@ from debugger import debug, done_success
 lizzzardoption_descr = OptionDescription(
         "lizzzard", "lizzzard options", [])
 
+SIMPLE_INTERPRETER = False
+
 def get_testing_config(**overrides):
     return get_combined_translation_config(
             lizzzardoption_descr,
@@ -24,7 +26,10 @@ def make_entry_point(lizzzardconfig=None):
         # jit.set_param(None, "vec_all", 1)
         # jit.set_param(None, "max_unroll_loops", 15)
         debug(u"Importing main...", 1)
-        from interpreter import main
+        if SIMPLE_INTERPRETER:
+            from simple_interpreter import main
+        else:
+            from interpreter import main
         main("../code-examples/example.clizz")
         done_success()
         return 0

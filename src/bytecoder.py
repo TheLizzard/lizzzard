@@ -125,18 +125,28 @@ class State:
 
     # Copy helpers
     def _for_block(self) -> tuple[Nonlocals,State]:
-        a:int = 0 if self.class_state else 1
-        new_nl:NonLocals = {name:link+a for name,link in self.nonlocals.items()}
-        master:State = self.master if self.class_state else self
-        return new_nl, master
+        while self.class_state:
+            self:State = self.master
+        new_nl:NonLocals = {name:link+1 for name,link in self.nonlocals.items()}
+        return new_nl, self
 
     def copy_for_func(self) -> State:
-        new_nl, master = self._for_block()
+        new_nl, self = self._for_block()
         state:State = State(blocks=self.blocks, block=Block(), loop_labels=[],
                             nonlocals=new_nl, regs=Regs(self.regs), env=Env(),
                             not_env=self.not_env.copy(), flags=self.flags,
-                            master=master, uses={})
+                            master=self, uses={})
         state.blocks.append(state.block)
+        return state
+
+    def copy_for_class(self) -> State:
+        _, self = self._for_block()
+        state:State = State(blocks=self.blocks, block=Block(), loop_labels=[],
+                            nonlocals=Nonlocals(), regs=Regs(self.regs),
+                            env=Env(), not_env=self.not_env.copy(),
+                            flags=self.flags, master=self, uses={})
+        state.blocks.append(state.block)
+        state.class_state:bool = True
         return state
 
     def copy_for_branch(self) -> State:
@@ -145,16 +155,6 @@ class State:
                      regs=self.regs, env=self.env.copy(), flags=self.flags,
                      not_env=self.not_env.copy(), master=self.master,
                      uses=self.uses.copy())
-
-    def copy_for_class(self) -> State:
-        new_nl, master = self._for_block()
-        state:State = State(blocks=self.blocks, block=Block(), loop_labels=[],
-                            nonlocals=new_nl, regs=Regs(self.regs), env=Env(),
-                            not_env=self.not_env.copy(), flags=self.flags,
-                            master=master, uses={})
-        state.blocks.append(state.block)
-        state.class_state:bool = True
-        return state
 
     @staticmethod
     def new(flags:FeatureFlags) -> State:
@@ -202,12 +202,11 @@ class State:
         state:State = self
         while state is not None:
             name:str = state._guard_env(name_token)
-            if (not state.class_state) or (state is self): # skip class def vars
-                if name in state.env:
-                    if name not in self.uses:
-                        self.uses[name] = (name_token, False)
-                    self.append_bast(BStoreLoadDict(name, reg, False))
-                    return
+            if name in state.env:
+                if name not in self.uses:
+                    self.uses[name] = (name_token, False)
+                self.append_bast(BStoreLoadDict(name, reg, False))
+                return
             state:State = state.master
         name_token.throw(f"variable {name!r} was not defined")
 
@@ -227,7 +226,8 @@ class State:
             used_token, iswrite = self.uses[name]
             used_token.double_throw("You used this variable before",
                                     "you declaired it as nonlocal", name_token)
-        if name not in self.master.env:
+        master:State = self.master
+        if name not in master.env:
             name_token.throw(f"variable {name!r} not defined in parent scope")
 
     def write_env(self, token:Token) -> None:
@@ -242,11 +242,11 @@ class State:
             self.env.append(name)
             used_token, iswrite = self.uses.get(name, (None,True))
             if not iswrite:
-                used_token.double_throw("This variable read here refers to " \
-                                        "a nonlocal variable",
-                                        "But this variable write here is to " \
-                                        "a nonlocal variable. Perhaps you " \
-                                        f"forgot `nonlocal {name}`?", token)
+                msg1:str = "This refers to a nonlocal variable [mode=read]"
+                msg2:str = f"But this refers to a nonlocal variable " \
+                           f"[mode=write].\nPerhaps you forgot " \
+                           f"`nonlocal {name}`?"
+                used_token.double_throw(msg1, msg2, token)
             self.uses[name] = (token, True)
 
     # Reg helpers
@@ -284,11 +284,9 @@ class State:
     def fransform_func(self) -> None:
         if not self.flags.is_set("ENV_IS_LIST"):
             return None
-        nonlocals:Nonlocals = Nonlocals()
         fransformed_block:Block = Block()
         for bt in self.block:
             if isinstance(bt, BLoadLink):
-                nonlocals[bt.name] = bt.link
                 continue
             elif isinstance(bt, BDotDict) and self.flags.is_set("ENV_IS_LIST"):
                 self.add_attr(bt.attr)
@@ -296,15 +294,20 @@ class State:
                 bt:Bast = BDotList(bt.obj_reg, attr_idx, bt.reg, bt.storing)
             elif isinstance(bt, BStoreLoadDict):
                 scope, link = self, 0
-                if bt.name in nonlocals:
-                    for _ in range(nonlocals[bt.name]):
+                if bt.name in self.nonlocals:
+                    for _ in range(self.nonlocals[bt.name]):
                         scope, link = scope.master, link+1
                 else:
-                    while bt.name not in scope.full_env:
-                        scope, link = scope.master, link+1
+                    while True:
+                        while scope.class_state:
+                            scope:State = scope.master
+                        if bt.name in scope.full_env:
+                            break
+                        link += 1
+                        scope:State = scope.master
                         if scope is None:
-                            raise NotImplementedError(f"{bt.name!r} cannot " \
-                                                      f"be found")
+                            raise NotImplementedError("Impossible")
+                link -= self.class_state
                 idx:int = scope.full_env.index(bt.name)
                 bt:Bast = BStoreLoadList(link, idx, bt.reg, bt.storing)
             fransformed_block.append(bt)
@@ -314,7 +317,7 @@ class State:
         fransformed_block:Block = Block()
         for bt in self.block:
             if isinstance(bt, BStoreLoadDict):
-                if bt.name not in self.nonlocals:
+                if bt.name in self.full_env:
                     self.add_attr(bt.name)
                     if self.flags.is_set("ENV_IS_LIST"):
                         attr_idx:int = self.attrs.index(bt.name)
@@ -346,7 +349,8 @@ class State:
         must_ret:bool = False
         for bt in self.block:
             if isinstance(bt, BRet):
-                fransformed_block.append(bt)
+                if not must_ret:
+                    fransformed_block.append(bt)
                 must_ret:bool = True
             elif isinstance(bt, Bable):
                 must_ret:bool = False
@@ -427,14 +431,13 @@ class ByteCoder:
         if isinstance(cmd, Assign):
             for target in cmd.targets:
                 if isinstance(target, Var):
-                    token:Token = target.identifier
-                    state.write_env(token)
-                    name:str = token.token
+                    name:str = target.identifier.token
             reg:int = self._convert(cmd.value, state, name=name)
             for target in cmd.targets:
                 if isinstance(target, Var):
-                    state.append_bast(BStoreLoadDict(target.identifier.token,
-                                                     reg, True))
+                    token:Token = target.identifier
+                    state.write_env(token)
+                    state.append_bast(BStoreLoadDict(token.token, reg, True))
                 elif isinstance(target, Op):
                     # res_reg:int = state.get_free_reg()
                     if target.op == "simple_idx":
@@ -647,13 +650,13 @@ class ByteCoder:
             #                  "the scope")
             if state.master is None:
                 cmd.ft.throw("variables in the global scope can't be nonlocal")
+            # if state.class_state:
+            #     cmd.ft.throw("class scope is the same as the outter scope " \
+            #                  "and the nonlocal keyword is disallowed")
             for identifier_token in cmd.identifiers:
                 identifier:str = identifier_token.token
                 if identifier not in state.nonlocals:
-                    if state.master.class_state:
-                        state.master.assert_can_nonlocal(identifier_token)
-                    else:
-                        state.assert_can_nonlocal(identifier_token)
+                    state.assert_can_nonlocal(identifier_token)
                     state.nonlocals[identifier] = 1
                 link:int = state.nonlocals[identifier]
                 state.append_bast(BLoadLink(identifier, link))
@@ -712,7 +715,8 @@ class ByteCoder:
                 nstate.free_reg(cls_obj_reg)
                 nstate.append_bast(BRet(0, True))
                 nstate.fransform_class()
-            self._todo.append(todo)
+            # self._todo.append(todo)
+            todo()
 
         else:
             raise NotImplementedError(f"Not implemented {cmd!r}")
@@ -727,14 +731,8 @@ class ByteCoder:
 
 if __name__ == "__main__":
     TEST1 = r"""
-print("The following should be all 1s/`true`s")
-
-
 print("####### General stuff ########")
-f = func(x){
-    g = func(){return x}
-    g
-}
+f = func(x){func(){x}}
 c = func(f){
     x = y = g = 0
     f()
@@ -787,6 +785,18 @@ get = tmp[1]
 add()
 add()
 print(2, "\t", 25==x, get()+5==30)
+
+
+# Similar to the one above
+f = func(x){[func(){x}, func(){nonlocal x;x+=1}]}
+tmp = f(1)
+get = tmp[0]
+add = tmp[1]
+print(2, "\t", get()*15==15, get()*20==20)
+add()
+print(1, "\t", get()*12+1==25)
+add()
+print(1, "\t", get()*10==30)
 
 
 Y = func(f){
@@ -865,9 +875,9 @@ A = class {
         A.X = 0
     }
     t = X
-    if X {a=0}
+    if X {a=1}
 }
-print(1, "\t", t==5)
+print(2, "\t", t==5, A.a==1)
 A.X = 6
 A.f(7)
 print(2, "\t", t==8, A.X==0)
@@ -951,14 +961,12 @@ print("cpython takes 0.201 sec")
 """[1:-1], False
 
     TEST6 = """
-f = func() {}
 A = class {
     A = B = 0
 }
 A.X = 1
 
 while (A.X < 10_000_000) {
-    f()
     A.X += 1
 }
 

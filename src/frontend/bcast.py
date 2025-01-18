@@ -742,6 +742,7 @@ def derialise(data):
         bast, data = TABLE[ast_t_id](data)
         assert isinstance(bast, Bast), "Impossible"
         bytecode.append(bast)
+    bytecode = [hint(bt, promote=True) for bt in bytecode]
     return flags, frame_size, env_size, attrs, bytecode
 
 
@@ -757,7 +758,7 @@ BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=",
                "or", "not", "len", ".", ".=", "idx", "simple_idx",
                "simple_idx=", "[]"]
 BUILTIN_SIDES = ["print", "append"]
-BUILTIN_HELPERS = ["$prev_env"]
+BUILTIN_HELPERS = []
 
 # "__class__" was in BULTIN_HELPERS but class scope no longer gets an env
 CLS_REG = 2
