@@ -164,10 +164,17 @@ cython_debug/
 
 # rpython's code
 src/frontend/rpython/*
+src/frontend/dotviewer/*
 !src/frontend/rpython/version.txt
+# old rpython
+src/frontend/_rpython/*
 
 # The compiled binary
 src/frontend/lizzzard
 
 # Logs
 src/frontend/log/*
+!src/frontend/log/1.log
+
+# Raytracer C code
+src/code-examples/raytracer/*

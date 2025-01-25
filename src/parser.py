@@ -72,6 +72,7 @@ class Parser:
         try:
             ast:Body = self._read_block(indented=False)
             assert_partials(ast)
+            simplify(ast)
             return ast
         except FinishedWithError as error:
             print(f"\x1b[91mSyntaxError: {error.msg}\x1b[0m", file=stderr)
@@ -701,8 +702,29 @@ class Parser:
         return args
 
 
+def simplify(body:Body, is_func:bool=False) -> Body:
+    # Unused expr removal
+    i:int = -1
+    while i+1 < len(body)-is_func:
+        i += 1
+        cmd:Cmd = body[i]
+        if isinstance(cmd, Class):
+            simplify(cmd.body)
+        elif isinstance(cmd, Expr):
+            if not is_func:
+                if not (isinstance(cmd, Literal) and cmd.literal.isstring()):
+                    continue
+            if isinstance(cmd, Op) and cmd.op == "call":
+                continue
+            body.pop(i)
+            i -= 1
+        elif isinstance(cmd, Assign):
+            if isinstance(cmd.value, Class|Func):
+                simplify(cmd.value.body, is_func=isinstance(cmd.value, Func))
+
+
 def assert_partials(body:Body) -> Body:
-    for i, cmd in enumerate(body):
+    for cmd in body:
         if isinstance(cmd, Assign):
             for target in cmd.targets:
                 _assert_partials_exp(target)
@@ -762,7 +784,7 @@ def _assert_partials_exp(exp:Expr, allow_qs:bool=False) -> None:
     elif isinstance(exp, Class):
         for base in exp.bases:
             _assert_partials_exp(base)
-        assert_partials(exp.insides)
+        assert_partials(exp.body)
     elif isinstance(exp, Var):
         token:Token = exp.identifier
         if token == "?":
@@ -785,7 +807,7 @@ def _replace_partial_qs_exp(exp:Expr, args:list[Var]) -> Expr:
         exp.exp1:Expr = _replace_partial_qs(exp.exp1, args)
         exp.exp2:Expr = _replace_partial_qs(exp.exp2, args)
     elif isinstance(exp, Class):
-        _replace_partial_qs(exp.insides)
+        _replace_partial_qs(exp.body)
     elif isinstance(exp, Var):
         token:Token = exp.identifier
         if token == "?":

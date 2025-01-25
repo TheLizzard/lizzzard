@@ -1,0 +1,220 @@
+ε = 0.000001
+clamp = func(val, low, high) { low if val < low else (high if val > high else val) }
+float_eq = func(val) { (val < ε) and (val > -ε) }
+float_abs = func(val) { val if val > 0 else -val }
+min = func(x, y) { x if x < y else y }
+max = func(x, y) { x if x > y else y }
+assert_true = func(boolean, error) {
+    if (not boolean) {
+        print(error)
+        print(1/0)
+    }
+}
+
+
+############################################################# Vector Colour Line
+Vector = class {
+    __init__ = func(this, x, y, z) {
+        this.x = x
+        this.y = y
+        this.z = z
+    }
+
+    add = func(this, other) { Vector(this.x+other.x, this.y+other.y, this.z+other.z) }
+    sub = func(this, other) { this.add(other.negate()) }
+    dot = func(this, other) { this.x*other.x + this.y*other.y + this.z*other.z }
+    cross = func(this, other) { Vector(this.y*other.z-this.z*other.y, -(this.x*other.z-this.z*other.x), this.x*other.y-this.y*other.x) }
+    mul2 = func(this, other) { Vector(this.x*other.x, this.y*other.y, this.z*other.z) }
+
+    repr = func(this) { "Vector[" + str(this.x) + ", " + str(this.y) + ", " + str(this.z) + "]" }
+    negate = func(this) { Vector(-this.x, -this.y, -this.z) }
+
+    mul = func(this, scalar) { Vector(this.x*scalar, this.y*scalar, this.z*scalar) }
+    div = func(this, scalar) { this.mul(1/scalar) }
+
+    abs2 = func(this) { this.dot(this) }
+    dist2 = func(this, other) {
+        tmp = this.sub(other)
+        return tmp.abs2()
+    }
+    eq = func(this, other) { this.sub(other).abs2() < ε }
+
+    isunit = func(this) { this.eq(Vector(0, 0, 0)) }
+    unit = func(this) { this.div(sqrt(this.abs2())) }
+    normalise = unit
+
+    clamp = func(this, low, high) { Vector(clamp(this.x, low, high), clamp(this.y, low, high), clamp(this.z, low, high)) }
+}
+
+
+Line = class {
+    __init__ = func(this, start, dir) {
+        this.start = start
+        this.dir = dir
+    }
+
+    from_points = func(start, end) { Line(start, end.sub(start).unit()) }
+}
+
+
+Colour = class {
+    __init__ = func(this, data) {
+        this.data = data
+    }
+
+    add = func(this, other) { Colour(this.data.add(other.data)) }
+    mul2 = func(this, other) { Colour(this.data.mul2(other.data)) }
+    mul = func(this, other) { Colour(this.data.mul(other)) }
+    div = func(this, other) { Colour(this.data.div(other)) }
+    clamp = func(this, low, high) { Colour(this.data.clamp(low, high)) }
+    r = func(this) { this.x }
+    g = func(this) { this.y }
+    b = func(this) { this.z }
+}
+
+
+####################################################################### Material
+Material = class {
+    __init__ = func(this, ks, kd, specularexponent, diffusecolour, specularcolour, isreflective, reflectivity, isrefractive, refractiveindex) {
+        this.ks = ks
+        this.kd = ks
+        this.specularexponent = specularexponent
+        this.diffusecolour = diffusecolour
+        this.specularcolour = specularcolour
+        this.isreflective = isreflective
+        this.reflectivity = reflectivity
+        this.isrefractive = isrefractive
+        this.refractiveindex = refractiveindex
+    }
+}
+
+
+######################################################################### Object
+Object = class {
+    __init__ = func(this, material) {
+        this.material = material
+    }
+}
+
+Triangle = class(Object) {
+    __init__ = func(this, material, v1, v2, v3) {
+        Object.__init__(material)
+        this.v1 = v1
+        this.v2 = v2
+        this.v3 = v3
+    }
+
+    intersects_line = func(this, line) {
+        # Wikipedia: Möller–Trumbore intersection algorithm
+        edge1 = this.v2.sub(this.v1)
+        edge2 = this.v3.sub(this.v1)
+        ray_cross_e2 = line.dir.cross(edge2)
+        det = edge1.dot(ray_cross_e2)
+        if (float_eq(det, 0)){
+            return NO_INTERSECTION
+        }
+        inv_det = 1 / det
+        s = line.start.sub(this.v1)
+        u = inv_det * s.dot(ray_cross_e2)
+        if (((u < 0) and (float_abs(u) > ε)) or ((u > 1) and (float_abs(u-1) > ε))) {
+            return NO_INTERSECTION
+        }
+        s_cross_e1 = s.cross(edge1)
+        v = inv_det * line.dir.dot(s_cross_e1)
+        if (((v < 0) and (float_abs(v) > ε)) or ((u + v > 1) and (float_abs(u + v - 1) > ε))) {
+            return NO_INTERSECTION
+        }
+        λ = inv_det * edge2.dot(s_cross_e1)
+        if (λ < ε) {
+            return NO_INTERSECTION
+        }
+        return Intersection(this, line.start.add(line.dir.mul(λ)))
+    }
+}
+
+Sphere = class(Object){
+    __init__ = func(this, material, center, r) {
+        Object.__init__(material)
+        this.center = center
+        this.r = r
+    }
+
+    intersects_line = func(this, line) {
+        intersection = this.line_inside_sphere(line)
+        if (intersection == NO_INTERSECTION) {
+            return NO_INTERSECTION
+        }
+        λ = intersection.where.sub(line.start).dot(line.dir)
+        if (λ < ε) {
+            return NO_INTERSECTION
+        }
+        debug = line.start.add(line.dir.mul(λ))
+        assert_true(debug.eq(intersection.where), "InternalError")
+        return intersection
+    }
+
+    line_inside_sphere = func(this, line) {
+        assert_true(line.dir.isunit(), "InternalError")
+        # Computed this by hand
+        n = line.start.sub(this.center)
+        tmp = -line.dir.dot(n)
+        Δ = tmp*tmp - n.abs2() + this.r*this.r
+        if (Δ < 0) {
+            return NO_INTERSECTION
+        }
+        sqrtΔ = sqrt(Δ)
+        λ = min(tmp-sqrtΔ, tmp+sqrtΔ)
+        return Intersection(this, line.dir.mul(λ).add(line.start))
+    }
+}
+
+Cylinder = class(Object){
+    __init__ = func(this, material, top_dir, base, height, r) {
+        Object.__init__(material)
+        this.top_dir = top_dir
+        this.base = base
+        this.height = height
+        this.r = r
+    }
+
+    intersects_line = func(this, line) {
+        # https://en.wikipedia.org/wiki/Line-cylinder_intersection
+        assert_true(line.dir.isunit(), "InternalError")
+        assert_true(this.top_dir.isunit(), "InternalError")
+        base = this.base.sub(line.start)
+        tmp = line.dir.cross(this.top_dir)
+        if float_eq(tmp.abs2(), 0) {
+            # Cylinder parallel to viewer so no intersections
+            return NO_INTERSECTION
+        }
+        tmp2 = base.dot(tmp)
+        tmp3 = tmp.abs2()
+        Δ = tmp3*this.r*this.r - tmp2*tmp2
+        if (Δ < 0) {
+            return NO_INTERSECTION
+        }
+        neg_b = tmp.dot(base.cross(this.top_dir))
+        sqrtΔ = sqrt(Δ)
+        λ = min(neg_b-sqrtΔ, neg_b+sqrtΔ) / tmp3
+        intersect_point = line.start.add(line.dir.mul(λ))
+        tmp2 = intersect_point.sub(this.base).dot(this.top_dir)
+        if ((tmp2 < 0) or (tmp2 > this.height)) {
+            return NO_INTERSECTION
+        }
+        if (λ < ε) {
+            return NO_INTERSECTION
+        }
+        return Intersection(this, intersect_point)
+    }
+}
+
+
+################################################################### Intersection
+Intersection = class {
+    __init__ = func(this, what, where) {
+        this.where = where
+        this.what = what
+    }
+}
+
+NO_INTERSECTION = Intersection(none, none)

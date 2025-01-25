@@ -27,6 +27,13 @@ def derialise_str(data, size_size):
     string = string_bytes.decode("utf-8")
     return string, data
 
+def serialise_float(value, size_size):
+    assert isinstance(value, float), "TypeError"
+    return serialise_str(str(value), size_size)
+def derialise_float(data, size_size):
+    value, data = derialise_str(data, size_size)
+    return str_to_float(value), data
+
 def serialise_list_int(array, size_size, size_item):
     assert isinstance(size_size, int), "TypeError"
     assert isinstance(array, list), "TypeError"
@@ -69,6 +76,7 @@ def derialise_ast_t_id(data):
 REG_SIZE = 1 # number of bytes needed to store a register id
 INT_LITERAL_SIZE = 8 # number of bytes needed to store a literal ints
 STR_LITERAL_SIZE = 4 # number of bytes to store a literal string size
+FLOAT_LITERAL_SIZE = STR_LITERAL_SIZE # note that floats are stores as strings
 AST_T_ID_SIZE = 1 # Size of free_ast_id
 NAME_SIZE = 1 # Variable name/bable size
 
@@ -219,6 +227,18 @@ class BLiteralStr(BLiteralHolder):
         value, data = derialise_str(data, STR_LITERAL_SIZE)
         return BLiteralStr(value), data
 
+class BLiteralFloat(BLiteralHolder):
+    _immutable_fields_ = ["value"]
+    __slots__ = "value"
+    def __init__(self, value):
+        assert isinstance(value, float), "TypeError"
+        self.value = const(value)
+    def serialise(self):
+        return serialise_float(self.value, FLOAT_LITERAL_SIZE)
+    def derialise(data):
+        value, data = derialise_float(data, FLOAT_LITERAL_SIZE)
+        return BLiteralFloat(value), data
+
 class BLiteralFunc(BLiteralHolder):
     _immutable_fields_ = ["env_size", "value", "nargs", "name"]
     __slots__ = "env_size", "value", "nargs", "name"
@@ -290,12 +310,13 @@ class BLiteral(Bast):
     __slots__ = "reg", "literal", "type"
     UNDEFINED_T = 0
     CLASS_T = 1
-    FUNC_T = 2
-    PROC_T = 3
-    NONE_T = 4
-    LIST_T = 5
-    INT_T = 6
-    STR_T = 7
+    FLOAT_T = 2
+    FUNC_T = 3
+    PROC_T = 4
+    NONE_T = 5
+    LIST_T = 6
+    INT_T = 7
+    STR_T = 8
     EMPTY_TS = (UNDEFINED_T, NONE_T, LIST_T)
 
     def __init__(self, reg, literal, type):
@@ -316,6 +337,9 @@ class BLiteral(Bast):
             literal = self.literal.serialise()
         elif self.type == BLiteral.STR_T:
             assert isinstance(self.literal, BLiteralStr), "TypeError"
+            literal = self.literal.serialise()
+        elif self.type == BLiteral.FLOAT_T:
+            assert isinstance(self.literal, BLiteralFloat), "TypeError"
             literal = self.literal.serialise()
         elif self.type in BLiteral.EMPTY_TS:
             assert self.literal is BNONE, "TypeError"
@@ -340,6 +364,8 @@ class BLiteral(Bast):
             literal, data = BLiteralFunc.derialise(data)
         elif type == BLiteral.STR_T:
             literal, data = BLiteralStr.derialise(data)
+        elif type == BLiteral.FLOAT_T:
+            literal, data = BLiteralFloat.derialise(data)
         elif type in BLiteral.EMPTY_TS:
             literal = BNONE
         elif type == BLiteral.CLASS_T:
@@ -755,6 +781,8 @@ Not implemented:
 """
 
 BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=",
+               "/", "sqrt",
+               "str", "int", "float",
                "or", "not", "len", ".", ".=", "idx", "simple_idx",
                "simple_idx=", "[]"]
 BUILTIN_SIDES = ["print", "append"]
@@ -763,8 +791,9 @@ BUILTIN_HELPERS = []
 # "__class__" was in BULTIN_HELPERS but class scope no longer gets an env
 CLS_REG = 2
 
-CONSTRUCTOR_NAME = u"__init__"
+SPECIAL_ATTRS = hint([u"__init__"], promote=True)
 CONSTRUCTOR_IDX = 0
+CONSTRUCTOR_NAME = SPECIAL_ATTRS[CONSTRUCTOR_IDX]
 
 BUILTIN_OPS = list(map(str, BUILTIN_OPS))
 BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))

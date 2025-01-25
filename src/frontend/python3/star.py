@@ -12,3 +12,8 @@ if PYTHON == 2:
     bytes, str, bytes2 = str, unicode, bytes
 else:
     bytes2 = str
+
+
+def str_to_float(string):
+    assert isinstance(string, str), "TypeError"
+    return float(bytes2(string))

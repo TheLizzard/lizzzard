@@ -3,11 +3,12 @@ from rpython.config.config import OptionDescription, BoolOption, IntOption, Arbi
 from rpython.config.translationoption import get_combined_translation_config
 from rpython.rlib import jit, objectmodel
 from debugger import debug, done_success
+from optimisers import OPTIMISERS
 
 lizzzardoption_descr = OptionDescription(
         "lizzzard", "lizzzard options", [])
 
-SIMPLE_INTERPRETER = False
+SIMPLE_INTERPRETER = True
 
 def get_testing_config(**overrides):
     return get_combined_translation_config(
@@ -38,6 +39,15 @@ def make_entry_point(lizzzardconfig=None):
 exposed_options = []
 
 def target(driver, args):
+    from rpython.jit.metainterp import optimizeopt
+    _old_build_opt_chain = optimizeopt.build_opt_chain
+    def build_opt_chain(enable_opts):
+        opts = _old_build_opt_chain(enable_opts)
+        for Class in OPTIMISERS:
+            opts.append(Class())
+        return opts
+    optimizeopt.build_opt_chain = build_opt_chain
+
     from rpython.config.config import to_optparse
     config = driver.config
     parser = to_optparse(config, useoptions=[])

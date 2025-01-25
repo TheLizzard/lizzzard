@@ -1,3 +1,4 @@
+import math
 import sys
 
 from python3.rpython_compat import *
@@ -17,27 +18,30 @@ class Value:
 class IntValue(Value):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
-
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
         self.value = value
 
 BoolValue = IntValue
 
-
 class StrValue(Value):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
-
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
+        self.value = value
+
+class FloatValue(Value):
+    _immutable_fields_ = ["value"]
+    __slots__ = "value"
+    def __init__(self, value):
+        assert isinstance(value, float), "TypeError"
         self.value = value
 
 
 class FuncValue(Value):
     _immutable_fields_ = ["tp", "masters", "env_size", "nargs", "name", "bound_obj"]
     __slots__ = "tp", "masters", "env_size", "nargs", "name", "bound_obj"
-
     def __init__(self, tp, masters, env_size, nargs, name, bound_obj):
         if bound_obj is not None:
             assert isinstance(bound_obj, ObjectValue), "TypeError"
@@ -59,7 +63,6 @@ class FuncValue(Value):
 class LinkValue(Value):
     _immutable_fields_ = ["link"]
     __slots__ = "link"
-
     def __init__(self, link):
         assert isinstance(link, int), "TypeError"
         assert link > 0, "ValueError"
@@ -100,32 +103,24 @@ class ListValue(Value):
 class NoneValue(Value):
     _immutable_fields_ = []
     __slots__ = ()
-
     def __init__(self): pass
-
-    def __repr__(self):
-        return u"none"
 
 
 class ObjectValue(Value):
     _immutable_fields_ = ["attr_vals", "type", "name"]
     __slots__ = "attr_vals", "type", "name"
-
     @look_inside
     def __init__(self, type, name):
         assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
         assert isinstance(name, str), "TypeError"
-
         if ENV_IS_LIST:
-            self.attr_vals = [None]
+            self.attr_vals = [None]*len(SPECIAL_ATTRS)
         else:
             self.attr_vals = Dict()
-            self.attr_vals[CONSTRUCTOR_NAME] = None
+            for name in SPECIAL_ATTRS:
+                self.attr_vals[name] = None
         self.type = const(type)
         self.name = name
-
-    def __repr__(self):
-        return u"object"
 
 
 NONE = const(NoneValue())
@@ -239,14 +234,20 @@ def attr_vals_extend_until_len(attr_vals, new_length):
 def attr_access(mros, attr_matrix, lens, obj, attr, storing):
     # Use the mro to figure out where attr is supposed to be
     mro = hint(mros[const(obj.type)], promote=True)
+    if obj.type&1:
+        mro = [obj] + mro
     for cls in mro:
         if (cls is not obj) and storing:
             continue
         assert 0 <= cls.type < len(attr_matrix), "InternalError"
         row = attr_matrix[cls.type]
         assert 0 <= attr < len(row), "InternalError"
-        attr_idx = row[attr]
+        soft, attr_idx = hint(row[attr], promote=True)
+        soft, attr_idx = const(soft), const(attr_idx)
         if attr_idx != -1:
+            if soft and (cls.type&1):
+                if (attr_idx >= len(cls.attr_vals)) or (cls.attr_vals[attr_idx] is None):
+                    continue
             break
     # Create the attr space in cls if attr_idx is -1
     else:
@@ -256,7 +257,8 @@ def attr_access(mros, attr_matrix, lens, obj, attr, storing):
         assert 0 <= cls.type < len(attr_matrix), "InternalError"
         row = attr_matrix[cls.type]
         assert 0 <= attr < len(row), "InternalError"
-        row[attr] = attr_idx
+        row[attr] = (False, attr_idx)
+    if len(cls.attr_vals) <= attr_idx:
         attr_vals_extend_until_len(cls.attr_vals, attr_idx+1)
     return cls, attr_idx
 
@@ -523,8 +525,10 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 value = attr_vals_load(cls.attr_vals, attr_idx)
                 if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
                     value = copy_and_bind_func(value, obj)
-                    attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
-                    attr_matrix[obj.type][bt.attr] = attr_idx
+                    _, attr_idx = attr_matrix[obj.type][bt.attr]
+                    if attr_idx == -1:
+                        attr_idx, lens[obj.type] = lens[obj.type], lens[obj.type]+1
+                        attr_matrix[obj.type][bt.attr] = (True, attr_idx)
                     attr_vals_extend_until_len(obj.attr_vals, attr_idx+1)
                     attr_vals_store(obj.attr_vals, attr_idx, value)
                 reg_store(regs, bt.reg, value)
@@ -541,6 +545,9 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             elif bt.type == BLiteral.STR_T:
                 assert isinstance(bt_literal, BLiteralStr), "TypeError"
                 literal = StrValue(bt_literal.value)
+            elif bt.type == BLiteral.FLOAT_T:
+                assert isinstance(bt_literal, BLiteralFloat), "TypeError"
+                literal = FloatValue(bt_literal.value)
             elif bt.type == BLiteral.NONE_T:
                 literal = NONE
             elif bt.type == BLiteral.UNDEFINED_T:
@@ -559,11 +566,11 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
                 # Register new class
                 cls_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
                 for _ in range(2):
-                    row = [-1 for _ in range(len(attrs))]
+                    row = [(False, -1) for _ in range(len(attrs))]
                     row = hint(row, promote=True)
-                    row[0] = const(0)
+                    row[0] = hint((False, 0), promote=True)
                     attr_matrix.append(row)
-                lens.extend([1,1])
+                lens.extend([len(SPECIAL_ATTRS),len(SPECIAL_ATTRS)])
                 literal = ObjectValue(cls_type, bt_literal.name)
                 while len(mros) <= literal.type: mros.append([])
                 mros[literal.type] = hint([literal]+_c3_merge(_mros), promote=True)
@@ -630,7 +637,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags):
             if isinstance(_func, ObjectValue) and (_func.type&1 == 0):
                 self = ObjectValue(_func.type+1, _func.name)
                 while len(mros) <= self.type: mros.append([])
-                mros[self.type] = hint([self]+mros[_func.type], promote=True)
+                mros[self.type] = hint(mros[_func.type], promote=True)
                 args = [self]
                 _func = const(_func.attr_vals[CONSTRUCTOR_IDX])
                 if _func is None:
@@ -861,37 +868,47 @@ def builtin_pure_nonlist(op, args, op_print):
     if op == u"+":
         if len(args) == 1:
             arg = args[0]
-            if not isinstance(arg, IntValue):
-                raise_type_error(op_print + u" expects an int if used with 1 argument")
-            return arg
+            if isinstance(arg, IntValue):
+                return arg
+            elif isinstance(arg, FloatValue):
+                return arg
         elif len(args) == 2:
             arg0, arg1 = args
             if isinstance(arg0, IntValue):
-                if not isinstance(arg1, IntValue):
-                    raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-                return IntValue(arg0.value + arg1.value)
+                if isinstance(arg1, IntValue):
+                    return IntValue(arg0.value + arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value + arg1.value)
             elif isinstance(arg0, StrValue):
-                if not isinstance(arg1, StrValue):
-                    raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-                return StrValue(arg0.value + arg1.value)
-            else:
-                raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+                if isinstance(arg1, StrValue):
+                    return StrValue(arg0.value + arg1.value)
+            elif isinstance(arg0, FloatValue):
+                if isinstance(arg1, IntValue):
+                    return FloatValue(arg0.value + arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value + arg1.value)
         else:
             raise_type_error(op_print + u" expects 1 or 2 arguments")
 
     elif op == u"-":
         if len(args) == 1:
             arg = args[0]
-            if not isinstance(arg, IntValue):
-                raise_type_error(op_print + u" expects an int if used with 1 argument")
-            return IntValue(-arg.value)
+            if isinstance(arg, IntValue):
+                return IntValue(-arg.value)
+            elif isinstance(arg, FloatValue):
+                return FloatValue(-arg.value)
         elif len(args) == 2:
             arg0, arg1 = args
-            if not isinstance(arg0, IntValue):
-                raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-            return IntValue(arg0.value - arg1.value)
+            if isinstance(arg0, IntValue):
+                if isinstance(arg1, IntValue):
+                    return IntValue(arg0.value - arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value - arg1.value)
+            elif isinstance(arg0, FloatValue):
+                if isinstance(arg1, IntValue):
+                    return FloatValue(arg0.value - arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value - arg1.value)
 
     elif op == u"*":
         if len(args) != 2:
@@ -900,46 +917,47 @@ def builtin_pure_nonlist(op, args, op_print):
         if isinstance(arg0, IntValue):
             if isinstance(arg1, IntValue):
                 return IntValue(arg0.value * arg1.value)
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(arg0.value * arg1.value)
             elif isinstance(arg1, StrValue):
                 return StrValue(arg0.value * arg1.value)
-            else:
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
         elif isinstance(arg0, StrValue):
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-            return StrValue(arg0.value * arg1.value)
-        else:
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+            if isinstance(arg1, IntValue):
+                return StrValue(arg0.value * arg1.value)
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, IntValue):
+                return FloatValue(arg0.value * arg1.value)
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(arg0.value * arg1.value)
 
     elif op == u"%":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
-        if not isinstance(arg0, IntValue):
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
-        if not isinstance(arg1, IntValue):
-            raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-        return IntValue(arg0.value % arg1.value)
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value % arg1.value)
 
     elif op == u"//":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
-        if not isinstance(arg0, IntValue):
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
-        if not isinstance(arg1, IntValue):
-            raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-        return IntValue(arg0.value // arg1.value)
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value // arg1.value)
 
     elif op == u"==":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
-            if not isinstance(arg1, IntValue):
-                return FALSE
-            if arg0.value == arg1.value:
-                return TRUE
+            if isinstance(arg1, IntValue):
+                if arg0.value == arg1.value:
+                    return TRUE
+            elif isinstance(arg1, FloatValue):
+                if arg0.value == arg1.value:
+                    return TRUE
+            return FALSE
         elif isinstance(arg0, StrValue):
             if not isinstance(arg1, StrValue):
                 return FALSE
@@ -959,30 +977,31 @@ def builtin_pure_nonlist(op, args, op_print):
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-            return BoolValue(arg0.value < arg1.value)
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value < arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value < arg1.value)
         elif isinstance(arg0, StrValue):
-            if not isinstance(arg1, StrValue):
-                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-            return BoolValue(arg0.value < arg1.value)
-        else:
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+            if isinstance(arg1, StrValue):
+                return BoolValue(arg0.value < arg1.value)
 
     elif op == u">":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-            return BoolValue(arg0.value > arg1.value)
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value > arg1.value)
         elif isinstance(arg0, StrValue):
-            if not isinstance(arg1, StrValue):
-                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-            return BoolValue(arg0.value > arg1.value)
-        else:
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+            if isinstance(arg1, StrValue):
+                return BoolValue(arg0.value > arg1.value)
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value > arg1.value)
 
     elif op == u"<=":
         v = builtin_pure(u">", args, op_print)
@@ -993,6 +1012,57 @@ def builtin_pure_nonlist(op, args, op_print):
         v = builtin_pure(u"<", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
         return to_bool_value(not v.value)
+
+    elif op == u"/":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return FloatValue(arg0.value/arg1.value)
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(arg0.value/arg1.value)
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, IntValue):
+                return FloatValue(arg0.value/arg1.value)
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(arg0.value/arg1.value)
+
+    elif op == u"sqrt":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return FloatValue(math.sqrt(arg.value))
+        elif isinstance(arg, FloatValue):
+            return FloatValue(math.sqrt(arg.value))
+
+    elif op == u"str":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        return StrValue(inner_repr(args[0]))
+
+    elif op == u"int":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return arg
+        elif isinstance(arg, FloatValue):
+            return IntValue(int(arg.value))
+        elif isinstance(arg, StrValue):
+            return IntValue(int(arg.value))
+
+    elif op == u"float":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return FloatValue(float(arg.value))
+        elif isinstance(arg, FloatValue):
+            return arg
+        elif isinstance(arg, StrValue):
+            return FloatValue(str_to_float(arg.value))
 
     elif op == u"or":
         if len(args) != 2:
@@ -1009,19 +1079,16 @@ def builtin_pure_nonlist(op, args, op_print):
         if len(args) != 1:
             raise_type_error(op_print + u" expects 1 argument")
         arg0 = args[0]
-        if not isinstance(arg0, StrValue):
-            raise_type_error(op_print + u" not supported on " + get_type(args[0]))
-        return IntValue(len(arg0.value))
+        if isinstance(arg0, StrValue):
+            return IntValue(len(arg0.value))
 
     elif op == u"simple_idx":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
-        if not isinstance(arg0, StrValue):
-            raise_type_error(op_print + u" not supported on " + get_type(args[0]))
-        if not isinstance(arg1, IntValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
-        return StrValue(arg0.value[arg1.value])
+        if isinstance(arg0, StrValue):
+            if isinstance(arg1, IntValue):
+                return StrValue(arg0.value[arg1.value])
 
     elif op == u"idx":
         if len(args) != 4:
@@ -1030,6 +1097,15 @@ def builtin_pure_nonlist(op, args, op_print):
 
     else:
         raise_unreachable_error(u"builtin_pure " + op + u" not implemented (needed for " + op_print + u")")
+
+    if len(args) == 1:
+        arg = args[0]
+        raise_type_error(u"can't use unary " + op_print + u" on " + get_type(arg))
+    elif len(args) == 2:
+        arg0, arg1 = args
+        raise_type_error(u"can't " + op_print + u" " + get_type(arg0) + u" with " + get_type(arg1))
+    else:
+        raise_unreachable_error(u"builtin_pure " + op + u" doesn't handle type error explicitly even though it has > 2 arguments")
 
 
 @look_inside
@@ -1041,7 +1117,7 @@ def inner_repr(obj):
     elif isinstance(obj, IntValue):
         return int_to_str(obj.value)
     elif isinstance(obj, StrValue):
-        return obj.value[1:]
+        return obj.value
     elif isinstance(obj, FuncValue):
         string = u"Func<"
         if obj.bound_obj is not None:
@@ -1057,7 +1133,10 @@ def inner_repr(obj):
         return string + u"]"
     elif isinstance(obj, ObjectValue):
         if obj.type & 1:
-            return u"<Object " + obj.name + u">"
+            if PYTHON == 3:
+                return u"<Object " + obj.name + u" at " + int_to_str(id(obj)) + u">"
+            else:
+                return u"<Object " + obj.name + u">"
         else:
             return u"<Class " + obj.name + u">"
     else:

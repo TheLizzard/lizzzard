@@ -95,7 +95,7 @@ class State:
         self.regs:Regs = regs
         self.env:Env = env
         if self.master is None:
-            self._attrs:list[str] = [CONSTRUCTOR_NAME]
+            self._attrs:list[str] = SPECIAL_ATTRS.copy()
 
     @property
     def attrs(self) -> list[str]:
@@ -432,6 +432,8 @@ class ByteCoder:
             for target in cmd.targets:
                 if isinstance(target, Var):
                     name:str = target.identifier.token
+                    if name == CONSTRUCTOR_NAME:
+                        break
             reg:int = self._convert(cmd.value, state, name=name)
             for target in cmd.targets:
                 if isinstance(target, Var):
@@ -477,14 +479,16 @@ class ByteCoder:
                                                BLiteral.INT_T))
             elif value.isstring():
                 res_reg:int = state.get_free_reg()
-                state.append_bast(BLiteral(res_reg, BLiteralStr(value.token),
-                                           BLiteral.STR_T))
+                val:BLiteralStr = BLiteralStr(value.token[1:])
+                state.append_bast(BLiteral(res_reg, val, BLiteral.STR_T))
             elif value in ("true", "false"):
                 res_reg:int = int(value == "true")
             elif value == "none":
                 res_reg:int = state.get_none_reg()
             elif value.isfloat():
-                raise NotImplementedError("TODO")
+                res_reg:int = state.get_free_reg()
+                val:BLiteralFloat = BLiteralFloat(float(value.token))
+                state.append_bast(BLiteral(res_reg, val, BLiteral.FLOAT_T))
             else:
                 raise NotImplementedError("Impossible")
 
@@ -615,6 +619,8 @@ class ByteCoder:
             func_literal:BLiteralFunc = BLiteralFunc(0, func_id, len(cmd.args),
                                                      name)
             state.append_bast(BLiteral(res_reg, func_literal, BLiteral.FUNC_T))
+            is_constructor:bool = state.class_state and \
+                                  (name == CONSTRUCTOR_NAME)
             def todo() -> None:
                 # <NEW BODY>:
                 # label_start:
@@ -630,13 +636,18 @@ class ByteCoder:
                     nstate.append_bast(BStoreLoadDict(token.token, i, True))
                 for i, subcmd in enumerate(cmd.body):
                     tmp_reg:int = self._convert(subcmd, nstate)
-                    # If last cmd is an Expr, return it
                     if (i == len(cmd.body)-1) and isinstance(subcmd, Expr):
-                        nstate.append_bast(BRet(tmp_reg, False))
+                        # If last cmd is an Expr and not constructor, return it
+                        if not is_constructor:
+                            nstate.append_bast(BRet(tmp_reg, False))
                     nstate.free_reg(tmp_reg)
-                if not nstate.must_ret:
-                    reg:int = nstate.get_free_reg()
-                    nstate.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
+                if not nstate.must_ret: # return `none` or `self`
+                    if is_constructor:
+                        reg:int = nstate.get_free_reg()
+                        arg_name:str = cmd.args[0].identifier.token
+                        nstate.append_bast(BStoreLoadDict(arg_name, reg, False))
+                    else:
+                        reg:int = nstate.get_none_reg()
                     nstate.append_bast(BRet(reg, False))
                 nstate.fransform_func()
                 func_literal.env_size = len(nstate.full_env)
@@ -710,7 +721,7 @@ class ByteCoder:
                 nstate.append_bast(Bable(label))
                 cls_obj_reg:int = nstate.get_free_reg()
                 assert cls_obj_reg == CLS_REG, "InternalError"
-                for assignment in cmd.insides:
+                for assignment in cmd.body:
                     self._convert(assignment, nstate)
                 nstate.free_reg(cls_obj_reg)
                 nstate.append_bast(BRet(0, True))
@@ -973,6 +984,12 @@ while (A.X < 10_000_000) {
 print("attr++", A.X)
 print("cpython takes 1.476 sec")
 """[1:-1], False
+
+    from os.path import join, dirname, abspath
+    filepath:str = join(dirname(abspath(__file__)), "code-examples",
+                        "raytracer.lizz")
+    with open(filepath, "r") as file:
+        TEST7 = (file.read(), False)
 
     # DEBUG_RAISE:bool = True
     # 1:all, 2:fib, 3:primes, 4:while++, 5:rec++, 6:attr++
