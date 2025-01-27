@@ -1,5 +1,6 @@
 from __future__ import annotations
 from enum import Enum, auto
+from io import StringIO
 
 
 DEBUG_THROW:bool = False
@@ -29,6 +30,11 @@ class Token:
 
     def name_as(self, token:str) -> Token:
         return Token(token, self.stamp, self.type)
+
+    @property
+    def size(self) -> int:
+        # TODO: account for str prefix and """?
+        return len(self.token) + self.isstring()
 
     def __eq__(self, other:str|Token) -> bool:
         if isinstance(other, str):
@@ -105,16 +111,21 @@ class FinishedWithError(SyntaxError): ...
 
 
 class PreLexer:
-    __slots__ = "under", "buffer", "ran_out", "line", "char", "line_string"
+    __slots__ = "under", "buffer", "ran_out", "line", "char", "line_string", \
+                "all"
 
     def __init__(self, buffer:TextIOBase) -> PreLexer:
         self.under:TextIOBase = buffer
+        self.all:StringIO = StringIO()
         self.ran_out:bool = False
         self.line_string:str = ""
         self.buffer:str = ""
         self.line:int = 1
         self.char:int = 0
         self.peek(1)
+
+    def get_all_text(self) -> str:
+        return self.all.getvalue()
 
     def __bool__(self) -> bool:
         return (not self.ran_out) or bool(self.buffer)
@@ -135,6 +146,7 @@ class PreLexer:
         if (len(self.buffer) < size) and (not self.ran_out):
             while True:
                 char:str = self.under.read(1)
+                self.all.write(char)
                 self.buffer += char
                 if char == "\n":
                     break
@@ -226,6 +238,9 @@ class Tokeniser:
         self.buffer:list[Token] = []
         self.ran_out:bool = False
         self.read_newline_into_buffer(first=True)
+
+    def get_all_text(self) -> str:
+        return self.under.get_all_text()
 
     def _throw(self, msg:str, stamp:Stamp=None) -> None:
         stamp:Stamp = stamp or self.under.stamp()
@@ -340,12 +355,16 @@ class Tokeniser:
         elif token in "$:[](){},;":
             self.under.read(1)
             ret:Token = Token(token, stamp, TokenType.OTHER)
-        elif token in "+-*^%|<>=":
+        elif token in "+-*^%|<>=&":
             self.under.read(1)
             if (token == "-") and (self.under.peek(1) == ">"):
                 token += self.under.read(1)
             else:
                 if (token == "*") and (self.under.peek(1) == "*"): # **
+                    token += self.under.read(1)
+                elif (token == ">") and (self.under.peek(1) == ">"): # >>
+                    token += self.under.read(1)
+                elif (token == "<") and (self.under.peek(1) == "<"): # <<
                     token += self.under.read(1)
                 if (token in "-+") and (self.under.peek(1) == token): # ++ --
                     token += self.under.read(1)

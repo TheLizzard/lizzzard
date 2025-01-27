@@ -71,11 +71,11 @@ def interpret(bytecode):
 def main(filepath=None):
     idx = 1 # If this is 0, the optimised trace is much longer than if it's 1
     bytecode = [
-                 BLiteral(0, BLiteralInt(1), BLiteral.INT_T), # env[0] = IntValue(1)
-                 BLiteral(5, BLiteralClass([],u"",u""), BLiteral.CLASS_T), # env[5] = new list
+                 BLiteral(EMPTY_ERR, 0, BLiteralInt(1), BLiteral.INT_T), # env[0] = IntValue(1)
+                 BLiteral(EMPTY_ERR, 5, BLiteralClass([],u"",u""), BLiteral.CLASS_T), # env[5] = new list
                  BLabel(u"while_start"),            # label
-                 BListStore(5, idx, 1, True),       # env[5].store(idx, val=env[0])
-                 BListStore(5, idx, 2, True),       # env[5].store(idx, value=NULL_PTR)
-                 BJump(u"while_start", 0, False),   # if env[7] -> jump to label
+                 BListStore(EMPTY_ERR, 5, idx, 1, True),       # env[5].store(idx, val=env[0])
+                 BListStore(EMPTY_ERR, 5, idx, 2, True),       # env[5].store(idx, value=NULL_PTR)
+                 BJump(EMPTY_ERR, u"while_start", 0, False),   # if env[7] -> jump to label
                ]
     interpret(bytecode)

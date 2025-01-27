@@ -1,20 +1,23 @@
 ε = 0.000001
 clamp = func(val, low, high) { low if val < low else (high if val > high else val) }
-float_eq = func(val) { (val < ε) and (val > -ε) }
 float_abs = func(val) { val if val > 0 else -val }
 min = func(x, y) { x if x < y else y }
 max = func(x, y) { x if x > y else y }
-assert_true = func(boolean, error) {
+assert = func(boolean, error) {
     if (not boolean) {
-        print(error)
-        print(1/0)
+        io.print(error)
+        io.print(1/0)
     }
 }
+float_random = func() { 0 }
 
 
 ############################################################# Vector Colour Line
 Vector = class {
     __init__ = func(this, x, y, z) {
+        assert(isinstance(x, float), "TypeError")
+        assert(isinstance(y, float), "TypeError")
+        assert(isinstance(z, float), "TypeError")
         this.x = x
         this.y = y
         this.z = z
@@ -26,21 +29,28 @@ Vector = class {
     cross = func(this, other) { Vector(this.y*other.z-this.z*other.y, -(this.x*other.z-this.z*other.x), this.x*other.y-this.y*other.x) }
     mul2 = func(this, other) { Vector(this.x*other.x, this.y*other.y, this.z*other.z) }
 
-    repr = func(this) { "Vector[" + str(this.x) + ", " + str(this.y) + ", " + str(this.z) + "]" }
+    _int_to_str = func(x) {
+        round = 6
+        output = str(float(x)) + "00000"
+        output = output[:round+1]
+        if (output[-1] >= "5") {
+            return output[:-2] + "123456789^"[int(output[-2])]
+        } else {
+            return output[:-1]
+        }
+    }
+    repr = func(this) { "Vector[" + Vector._int_to_str(this.x) + ", " + Vector._int_to_str(this.y) + ", " + Vector._int_to_str(this.z) + "]" }
     negate = func(this) { Vector(-this.x, -this.y, -this.z) }
 
     mul = func(this, scalar) { Vector(this.x*scalar, this.y*scalar, this.z*scalar) }
     div = func(this, scalar) { this.mul(1/scalar) }
 
     abs2 = func(this) { this.dot(this) }
-    dist2 = func(this, other) {
-        tmp = this.sub(other)
-        return tmp.abs2()
-    }
-    eq = func(this, other) { this.sub(other).abs2() < ε }
+    dist2 = func(this, other) { this.sub(other).abs2() }
+    eq = func(this, other) { this.dist2(other) < ε }
 
-    isunit = func(this) { this.eq(Vector(0, 0, 0)) }
-    unit = func(this) { this.div(sqrt(this.abs2())) }
+    isunit = func(this) { this.abs2() == 1 }
+    unit = func(this) { this.div(math.sqrt(this.abs2())) }
     normalise = unit
 
     clamp = func(this, low, high) { Vector(clamp(this.x, low, high), clamp(this.y, low, high), clamp(this.z, low, high)) }
@@ -49,6 +59,9 @@ Vector = class {
 
 Line = class {
     __init__ = func(this, start, dir) {
+        assert(isinstance(start, Vector), "TypeError")
+        assert(isinstance(dir, Vector), "TypeError")
+        assert(dir.isunit(), "InternalError")
         this.start = start
         this.dir = dir
     }
@@ -59,6 +72,7 @@ Line = class {
 
 Colour = class {
     __init__ = func(this, data) {
+        assert(isinstance(data, Vector), "TypeError")
         this.data = data
     }
 
@@ -67,9 +81,10 @@ Colour = class {
     mul = func(this, other) { Colour(this.data.mul(other)) }
     div = func(this, other) { Colour(this.data.div(other)) }
     clamp = func(this, low, high) { Colour(this.data.clamp(low, high)) }
-    r = func(this) { this.x }
-    g = func(this) { this.y }
-    b = func(this) { this.z }
+    repr = func(this) { "Colour" + this.data.repr()[6:] }
+    r = func(this) { this.data.x }
+    g = func(this) { this.data.y }
+    b = func(this) { this.data.z }
 }
 
 
@@ -77,7 +92,7 @@ Colour = class {
 Material = class {
     __init__ = func(this, ks, kd, specularexponent, diffusecolour, specularcolour, isreflective, reflectivity, isrefractive, refractiveindex) {
         this.ks = ks
-        this.kd = ks
+        this.kd = kd
         this.specularexponent = specularexponent
         this.diffusecolour = diffusecolour
         this.specularcolour = specularcolour
@@ -92,25 +107,30 @@ Material = class {
 ######################################################################### Object
 Object = class {
     __init__ = func(this, material) {
+        assert(isinstance(material, Material), "TypeError")
         this.material = material
     }
 }
 
 Triangle = class(Object) {
     __init__ = func(this, material, v1, v2, v3) {
-        Object.__init__(material)
+        assert(isinstance(v1, Vector), "TypeError")
+        assert(isinstance(v2, Vector), "TypeError")
+        assert(isinstance(v3, Vector), "TypeError")
+        Object.__init__(this, material)
         this.v1 = v1
         this.v2 = v2
         this.v3 = v3
     }
 
     intersects_line = func(this, line) {
+        assert(isinstance(line, Line), "TypeError")
         # Wikipedia: Möller–Trumbore intersection algorithm
         edge1 = this.v2.sub(this.v1)
         edge2 = this.v3.sub(this.v1)
         ray_cross_e2 = line.dir.cross(edge2)
         det = edge1.dot(ray_cross_e2)
-        if (float_eq(det, 0)){
+        if (not det) {
             return NO_INTERSECTION
         }
         inv_det = 1 / det
@@ -130,16 +150,26 @@ Triangle = class(Object) {
         }
         return Intersection(this, line.start.add(line.dir.mul(λ)))
     }
+
+    normal = func(this, point) {
+        assert(isinstance(point, Vector), "TypeError")
+        edge1 = this.v2.sub(this.v1)
+        edge2 = this.v3.sub(this.v1)
+        return edge1.cross(edge2).unit()
+    }
 }
 
 Sphere = class(Object){
     __init__ = func(this, material, center, r) {
-        Object.__init__(material)
+        assert(isinstance(center, Vector), "TypeError")
+        assert(isinstance(r, float), "TypeError")
+        Object.__init__(this, material)
         this.center = center
         this.r = r
     }
 
     intersects_line = func(this, line) {
+        assert(isinstance(line, Line), "TypeError")
         intersection = this.line_inside_sphere(line)
         if (intersection == NO_INTERSECTION) {
             return NO_INTERSECTION
@@ -149,12 +179,12 @@ Sphere = class(Object){
             return NO_INTERSECTION
         }
         debug = line.start.add(line.dir.mul(λ))
-        assert_true(debug.eq(intersection.where), "InternalError")
+        assert(debug.eq(intersection.where), "InternalError")
         return intersection
     }
 
     line_inside_sphere = func(this, line) {
-        assert_true(line.dir.isunit(), "InternalError")
+        assert(isinstance(line, Line), "TypeError")
         # Computed this by hand
         n = line.start.sub(this.center)
         tmp = -line.dir.dot(n)
@@ -162,28 +192,35 @@ Sphere = class(Object){
         if (Δ < 0) {
             return NO_INTERSECTION
         }
-        sqrtΔ = sqrt(Δ)
+        sqrtΔ = math.sqrt(Δ)
         λ = min(tmp-sqrtΔ, tmp+sqrtΔ)
         return Intersection(this, line.dir.mul(λ).add(line.start))
     }
+
+    normal = func(this, point) { point.sub(this.center).unit() }
 }
 
-Cylinder = class(Object){
-    __init__ = func(this, material, top_dir, base, height, r) {
-        Object.__init__(material)
+Cylinder = class(Object) {
+    __init__ = func(this, material, top_dir, center, height, r) {
+        assert(isinstance(top_dir, Vector), "TypeError")
+        assert(isinstance(height, float), "TypeError")
+        assert(isinstance(center, Vector), "TypeError")
+        assert(isinstance(r, float), "TypeError")
+        assert(top_dir.isunit(), "InternalError")
+        Object.__init__(this, material)
+        base = center.add(top_dir.mul(-height))
         this.top_dir = top_dir
         this.base = base
-        this.height = height
+        this.height = height*2
         this.r = r
     }
 
     intersects_line = func(this, line) {
+        assert(isinstance(line, Line), "TypeError")
         # https://en.wikipedia.org/wiki/Line-cylinder_intersection
-        assert_true(line.dir.isunit(), "InternalError")
-        assert_true(this.top_dir.isunit(), "InternalError")
         base = this.base.sub(line.start)
         tmp = line.dir.cross(this.top_dir)
-        if float_eq(tmp.abs2(), 0) {
+        if (not tmp.abs2()) {
             # Cylinder parallel to viewer so no intersections
             return NO_INTERSECTION
         }
@@ -194,7 +231,7 @@ Cylinder = class(Object){
             return NO_INTERSECTION
         }
         neg_b = tmp.dot(base.cross(this.top_dir))
-        sqrtΔ = sqrt(Δ)
+        sqrtΔ = math.sqrt(Δ)
         λ = min(neg_b-sqrtΔ, neg_b+sqrtΔ) / tmp3
         intersect_point = line.start.add(line.dir.mul(λ))
         tmp2 = intersect_point.sub(this.base).dot(this.top_dir)
@@ -206,15 +243,458 @@ Cylinder = class(Object){
         }
         return Intersection(this, intersect_point)
     }
+
+    normal = func(this, point) {
+        assert(isinstance(point, Vector), "TypeError")
+        tmp = point.sub(this.base)
+        tmp2 = tmp.dot(this.top_dir)
+        raw_normal = tmp.sub(this.top_dir.mul(tmp2))
+        # normal = raw_normal.div(this.r) # Inacurate
+        return raw_normal.unit()
+    }
+}
+
+
+
+Circle = class(Object) {
+    __init__ = func(this, material, normal, center, r) {
+        assert(isinstance(center, Vector), "TypeError")
+        assert(isinstance(normal, Vector), "TypeError")
+        assert(isinstance(r, float), "TypeError")
+        assert(normal.isunit(), "InternalError")
+        Object.__init__(this, material)
+        this._normal = normal
+        this.center = center
+        this.r = r
+    }
+
+    intersects_line = func(this, line) {
+        assert(isinstance(line, Line), "TypeError")
+        # https://en.wikipedia.org/wiki/Line-cylinder_intersection#Planar_end_caps
+        tmp = line.dir.dot(this._normal)
+        if (not tmp) {
+            return NO_INTERSECTION
+        }
+        λ = this.center.sub(line.start).dot(this._normal) / tmp
+        intersection = line.start.add(line.dir.mul(λ))
+        if (intersection.sub(this.center).abs2() > this.r*this.r) {
+            return NO_INTERSECTION
+        }
+        if (λ < ε) {
+            return NO_INTERSECTION
+        }
+        return Intersection(this, intersection)
+    }
+
+    normal = func(this, point) { this._normal }
 }
 
 
 ################################################################### Intersection
 Intersection = class {
     __init__ = func(this, what, where) {
+        assert(isinstance(where, [Vector,none]), "TypeError")
+        assert(isinstance(what, [Object,none]), "TypeError")
         this.where = where
         this.what = what
     }
 }
 
 NO_INTERSECTION = Intersection(none, none)
+
+
+line_intersections = func(ray, scene) {
+    assert(isinstance(scene, Scene), "TypeError")
+    assert(isinstance(ray, Line), "TypeError")
+    i = -1
+    output = []
+    while true {
+        i += 1
+        if (i >= scene.objs.len()) {
+            break
+        }
+        obj = scene.objs[i]
+        intersection = obj.intersects_line(ray)
+        if (intersection.what) {
+            output.append(intersection)
+        }
+    }
+    return output
+}
+
+
+######################################################## Camera PointLight Scene
+Camera = class {
+    __init__ = func(this, width, height, looking_dir, upwards_dir, pos, fov, exposure) {
+        this.width = width
+        this.height = height
+        this.looking_dir = looking_dir.unit()
+        this.upwards_dir = upwards_dir.unit()
+        this.pos = pos
+        this.fov = fov
+        this.exposure = exposure
+    }
+}
+
+PointLight = class {
+    __init__ = func(this, colour, pos) {
+        assert(isinstance(colour, Colour), "TypeError")
+        assert(isinstance(pos, Vector), "TypeError")
+        this.colour = colour
+        this.pos = pos
+    }
+}
+
+Scene = class {
+    __init__ = func(this, point_lights, objs, camera, bg, nbounces) {
+        assert(isinstance(point_lights, list), "TypeError")
+        assert(isinstance(camera, Camera), "TypeError")
+        assert(isinstance(nbounces, int), "TypeError")
+        assert(isinstance(objs, list), "TypeError")
+        assert(isinstance(bg, Colour), "TypeError")
+        this.point_lights = point_lights
+        this.objs = objs
+        this.camera = camera
+        this.bg = bg
+        this.nbounces = nbounces
+
+        # Add circles to cylinders
+        i = 0
+        while (i < objs.len()) {
+            obj = objs[i]
+            if isinstance(obj, Cylinder) {
+                objs.append(Circle(obj.material, obj.top_dir.mul(-1), obj.base, obj.r))
+                objs.append(Circle(obj.material, obj.top_dir, obj.base.add(obj.top_dir.mul(obj.height)), obj.r))
+            }
+            i += 1
+        }
+    }
+}
+
+
+###################################################################### RayTracer
+save_img = func(image, width, height, path) {
+    io.print("Size: " + str(width) + "x" + str(height))
+    io.print("Data points: " + str(image.len()))
+    io.print("Path: " + path)
+    file = io.open(path, "w")
+    u8 = func(x) { int(clamp(x+0.5, 0, 255)) }
+    if true {
+        file.write("P3\n")
+        file.write("# :-)\n")
+        file.write(str(width) + " " + str(height) + "\n")
+        file.write("255\n")
+        y = -1
+        while true {
+            y += 1
+            if (y >= height) {
+                break
+            }
+            x = -1
+            while true {
+                x += 1
+                if (x >= width) {
+                    break
+                }
+                colour = image[y*width+x]
+                file.write(str(u8(255*colour.r())))
+                file.write(" ")
+                file.write(str(u8(255*colour.g())))
+                file.write(" ")
+                file.write(str(u8(255*colour.b())))
+                file.write(" ")
+            }
+            file.write("\n")
+        }
+    }
+}
+
+tone_map = func(image, width, height, camera) {}
+
+reflect = func(dir, normal) { dir.sub(normal.mul(2*dir.dot(normal))).unit() }
+
+refract = func(dir, normal, eta) {
+    cosi = -dir.dot(normal)
+    sint2 = eta * eta * (1 - cosi*cosi)
+    if (sint2 > 1) {
+        return dir.negate() # Total internal reflection
+    }
+    cost = math.sqrt(1 - sint2)
+    return dir.mul(eta).add(normal.mul(eta*cosi-cost)).unit()
+}
+
+compute_lighting = func(point, normal, view, material, scene) {
+    assert(normal.isunit(), "InternalError")
+    assert(view.isunit(), "InternalError")
+
+    result = scene.bg.mul(scene.camera.exposure)
+
+    i = -1
+    while true {
+        i += 1
+        if (i >= scene.point_lights.len()) {
+            break
+        }
+        light = scene.point_lights[i]
+        # Calculate the direction to the light source
+        light_dir = light.pos.sub(point)
+        distance_to_light = light_dir.abs2()
+        light_dir = light_dir.div(math.sqrt(distance_to_light))
+        assert(light_dir.isunit(), "InternalError")
+
+        # Shadow check: cast a ray from the point to the light
+        new_point = point.add(light_dir.mul(1/1000))
+        shadow_ray = Line(new_point, light_dir)
+        in_shadow = false
+
+        shadow_intersections = line_intersections(shadow_ray, scene)
+        j = -1
+        while true {
+            j += 1
+            if (j >= shadow_intersections.len()) {
+                break
+            }
+            shadow_intersection = shadow_intersections[j]
+            dist = shadow_intersection.where.sub(point).abs2()
+            if (dist < distance_to_light) {
+                in_shadow = true
+                break
+            }
+        }
+        if (in_shadow) {continue}
+
+        # Diffuse lighting
+        diff_intensity = light_dir.dot(normal)
+        if (material and (diff_intensity > 0)) {
+            diffl = light.colour.mul2(material.diffusecolour).mul(diff_intensity*material.kd)
+            result = result.add(diffl)
+        }
+
+        # Specular lighting
+        if (material and (material.ks > 0)) {
+            reflected = reflect(light_dir.mul(-1), normal)
+            spec_intensity = reflected.dot(view)
+            if (spec_intensity > 0) {
+                spec_intensity = math.pow(spec_intensity, material.specularexponent)
+                spec = light.colour.mul2(material.specularcolour).mul(spec_intensity*material.ks)
+                result = result.add(spec)
+            }
+        }
+    }
+
+    # Clamp the result colour values to [0, 1]
+    return result.clamp(0, 1)
+}
+
+
+trace_ray = func(ray, scene, depth) {
+    if (depth > scene.nbounces) {
+        return scene.bg
+    }
+
+    # Initialize variables to store the closest intersection
+    closest_intersection = NO_INTERSECTION
+    closest_object = none
+    closest_dist = 0
+
+    # Find the closest intersection point
+    intersections = line_intersections(ray, scene)
+    i = -1
+    while true {
+        i += 1
+        if (i >= intersections.len()) {
+            break
+        }
+        intersection = intersections[i]
+        dist = intersection.where.sub(ray.start).dot(ray.dir)
+        # If the object is behind us
+        if (dist < 0) {
+            continue
+        }
+        # If this is a closer interaction
+        if ((not closest_intersection.what) or (dist < closest_dist)) {
+            closest_intersection = intersection
+            closest_object = intersection.what
+            closest_dist = dist
+        }
+    }
+
+    # If no intersection is found, return the background colour
+    if (not closest_intersection.what) {
+        return scene.bg
+    }
+
+    # Retrieve material and compute the normal at the intersection point
+    material = closest_object.material
+    point = closest_intersection.where
+    normal = closest_object.normal(point)
+    assert(normal.isunit(), "InternalError")
+
+    # Adjust the normal direction to ensure it's facing against the ray direction
+    if (normal.dot(ray.dir) > 0) {
+        normal = normal.negate()
+    }
+
+    # Compute lighting at the intersection point
+    colour = compute_lighting(point, normal, ray.dir.negate(), material, scene)
+
+    # Reflection handling
+    if (material and material.isreflective and (depth < scene.nbounces)) {
+        reflected_ray = Line(point, reflect(ray.dir, normal))
+        # Trace the reflected ray
+        reflected_colour = trace_ray(reflected_ray, scene, depth+1)
+        # Blend the reflected colour with the local colour based on reflectivity
+        colour = colour.mul(1-material.reflectivity).add(reflected_colour.mul(material.reflectivity))
+    }
+
+    # Refraction handling
+    if (material and material.isrefractive and (depth < scene.nbounces)) {
+        if (normal.dot(ray.dir) < 0) {
+            eta = 1 / material.refractiveindex
+        } else {
+            eta = material.refractiveindex
+        }
+        refraction_dir = refract(ray.dir, normal, eta)
+        if (not refraction_dir.abs2()) { # Valid refraction
+            refracted_ray = Line(point, refraction_dir)
+            # Trace the refracted ray
+            refracted_colour = trace_ray(refracted_ray, scene, depth+1)
+            # Blend the refracted colour with the final colour
+            colour = colour.mul(1-material.reflectivity).add(refracted_colour.mul(material.reflectivity))
+        }
+    }
+    return colour.clamp(0, 1)
+}
+
+
+raytracer = func(scene, output_path) {
+    io.print("[DEBUG]: Setting up raytracer...")
+    width = scene.camera.width
+    height = scene.camera.height
+    io.print("[DEBUG]:   camera.dimensions[" + str(width) + "x" + str(height) + "]")
+    io.print("[DEBUG]:   camera.exposure[" + str(scene.camera.exposure) + "]")
+    io.print("[DEBUG]:   camera.fov[" + str(scene.camera.fov) + "]")
+    image = [scene.bg]*(width*height)
+    # Precompute camera parameters
+    aspect_ratio = width/height
+    viewport_height = 2*math.tan(scene.camera.fov/2)
+    viewport_width = aspect_ratio * viewport_height
+    forward = scene.camera.looking_dir
+    up = scene.camera.upwards_dir
+    right = forward.cross(up).unit()
+    root_pos = scene.camera.pos
+    io.print("[DEBUG]:   camera.up[" + up.repr() + "]")
+    io.print("[DEBUG]:   camera.right[" + right.repr() + "]")
+    io.print("[DEBUG]:   camera.forward[" + forward.repr() + "]")
+    io.print("[DEBUG]:   camera.pos[" + root_pos.repr() + "]")
+    io.print("[DEBUG]: Raytracing...")
+    progress = 0
+
+    y = -1
+    while true {
+        y += 1
+        if (y >= height) {
+            break
+        }
+        x = -1
+        while true {
+            x += 1
+            if (x >= width) {
+                break
+            }
+            colour = Colour(Vector(0, 0, 0))
+            total_pixel_samples = PIXEL_SAMPLES
+            pixel_sample = -1
+            while true {
+                pixel_sample += 1
+                if (pixel_sample >= total_pixel_samples) {
+                    break
+                }
+
+                if (PIXEL_SAMPLES > 1) {
+                    sample_x = x + float_random()
+                    sample_y = y + float_random()
+                } else {
+                    sample_x = x
+                    sample_y = y
+                }
+
+                lens_sample = -1
+                while true {
+                    lens_sample += 1
+                    if (lens_sample >= LENS_SAMPLES) {
+                        break
+                    }
+
+                    if (LENS_SAMPLES > 1) {
+                        pos = root_pos.add(up.mul(float_random()/100).add(right.mul(float_random()/100)))
+                    } else {
+                        pos = root_pos
+                    }
+                    xmul = viewport_width*(sample_x/width - 0.5)
+                    ymul = viewport_height*(sample_y/height - 0.5)
+                    pixel_dir = forward.add(right.mul(-xmul)).add(up.mul(-ymul))
+
+                    ray = Line(pos, pixel_dir.unit())
+                    colour = colour.add(trace_ray(ray, scene, 0))
+                    if ((progress & ((1<<22)-1)) == 0){
+                        prog = progress / (width*height*PIXEL_SAMPLES*LENS_SAMPLES)
+                        io.print("\x1b[96m\r\x1b[0K[PROGRESS]: " + str(prog) + "%\x1b[0m\r")
+                    }
+                    progress += 1
+                }
+            }
+            image[y*width+x] = colour.div(PIXEL_SAMPLES*LENS_SAMPLES)
+        }
+    }
+    io.print("\x1b[2K\x1b[1K\r\x1b[0K[DEBUG]: Applying tone map...")
+    tone_map(image, width, height, scene.camera)
+    io.print("[DEBUG]: Saving...")
+    save_img(image, width, height, output_path)
+    io.print("\x1b[96m[DONE]\x1b[0m")
+}
+
+
+########################################################################### Main
+load_scene = func() {
+    WIDTH  = 600
+    HEIGHT = 400
+    FORWARDS = Vector(0.447249, -0.157593, 0.880416)
+    UP       = Vector(0.0, 1.0, 0.0)
+    POS      = Vector(-1, 0.5, -1.5)
+    BG       = Colour(Vector(0.25, 0.25, 0.25))
+    NBOUNCES = 8
+    EXPOSURE = 0.1
+
+    make_material = / Material(0.1, 0.9, 20, Colour(?), Colour(Vector(1,1,1)), ?, 1, false, 1) /
+    c1 = Vector(0.8,0.5,0.5)
+    c2 = Vector(0.5,0.5,0.8)
+    c3 = Vector(0.8,0.5,0.8)
+    c4 = Vector(0.5,0.8,0.5)
+
+    objs = []
+    objs.append(Sphere(make_material(c1, false), Vector(-0.35,-0.2,1), 0.3))
+    objs.append(Sphere(make_material(c3, false), Vector(0,0.2,-1.25), 0.2))
+    objs.append(Cylinder(make_material(c2, false), Vector(0,1,0), Vector(0.3,0,1), 0.5, 0.25))
+    objs.append(Triangle(make_material(c4, false), Vector(-1,-0.5,2), Vector(1,-0.5,2), Vector(1,-0.5,0)))
+    objs.append(Triangle(make_material(c4, false), Vector(-1,-0.5,0), Vector(-1,-0.5,2), Vector(1,-0.5,0)))
+    objs.append(Triangle(make_material(c4, true), Vector(-1,-0.5,2), Vector(1,2.5,2), Vector(1,-0.5,2)))
+    objs.append(Triangle(make_material(c4, true), Vector(-1,-0.5,2), Vector(-1,2.5,2), Vector(1,2.5,2)))
+
+    lights = []
+    lights.append(PointLight(Colour(Vector(0.75,0.75,0.75)), Vector(0,1,0.5)))
+
+    camera = Camera(WIDTH, HEIGHT, FORWARDS, UP, POS, 45, EXPOSURE)
+    return Scene(lights, objs, camera, BG, NBOUNCES)
+}
+
+main = func() {
+    scene = load_scene()
+    raytracer(scene, "../code-examples/img-lizzzard.ppm")
+}
+
+
+PIXEL_SAMPLES = 1
+LENS_SAMPLES = 1
+
+main()

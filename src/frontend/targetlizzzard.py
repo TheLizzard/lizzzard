@@ -2,13 +2,14 @@
 from rpython.config.config import OptionDescription, BoolOption, IntOption, ArbitraryOption, FloatOption
 from rpython.config.translationoption import get_combined_translation_config
 from rpython.rlib import jit, objectmodel
-from debugger import debug, done_success
+
+from debugger import debug, done_success, done_exit
 from optimisers import OPTIMISERS
 
 lizzzardoption_descr = OptionDescription(
         "lizzzard", "lizzzard options", [])
 
-SIMPLE_INTERPRETER = True
+SIMPLE_INTERPRETER = False
 
 def get_testing_config(**overrides):
     return get_combined_translation_config(
@@ -31,8 +32,11 @@ def make_entry_point(lizzzardconfig=None):
             from simple_interpreter import main
         else:
             from interpreter import main
-        main("../code-examples/example.clizz")
-        done_success()
+        exit_code = main("../code-examples/example.clizz")
+        if exit_code == 0:
+            done_success()
+        else:
+            done_exit(exit_code)
         return 0
     return entry_point
 

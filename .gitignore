@@ -176,5 +176,7 @@ src/frontend/lizzzard
 src/frontend/log/*
 !src/frontend/log/1.log
 
-# Raytracer C code
+# Raytracer testing stuff
 src/code-examples/raytracer/*
+src/code-examples/*.ppm
+src/code-examples/pypy*
