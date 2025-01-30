@@ -209,8 +209,8 @@ def regs_load(regs, reg):
         return value
 
 @look_inside
-def regs_store(regs, reg, value):
-    if value is None:
+def regs_store(regs, reg, value, chk=True):
+    if const(chk) and (value is None):
         raise_error(u"InternalError: trying to store undefined inside regs")
     if reg < 1:
         return # Don't store in regs 0 or 1
@@ -672,7 +672,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                 elif bt.type == BLiteral.NONE_T:
                     literal = NONE
                 elif bt.type == BLiteral.UNDEFINED_T:
-                    regs[bt.reg] = None
+                    regs_store(regs, bt.reg, None, chk=False)
                     continue
                 elif bt.type == BLiteral.LIST_T:
                     literal = ListValue()
@@ -705,7 +705,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     tp = teleports_get(teleports, bt_literal.label)
                     assert isinstance(tp, IntValue), "TypeError"
                     pc, regs = tp.value, list(regs)
-                    regs[CLS_REG] = literal
+                    regs_store(regs, CLS_REG, literal)
                     continue
                 else:
                     raise NotImplementedError()
@@ -714,7 +714,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
             elif isinstance(bt, BJump):
                 value = regs_load(regs, bt.condition_reg)
                 if CLEAR_AFTER_USE and (bt.condition_reg > 1):
-                    regs[bt.condition_reg] = None
+                    regs_store(regs, bt.condition_reg, None, chk=False)
                 condition = force_bool(value)
                 # if condition != bt.negated: # RPython's JIT can't constant fold in this form :/
                 if (condition and (not bt.negated)) or ((not condition) and bt.negated):

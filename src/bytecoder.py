@@ -301,6 +301,7 @@ class State:
                 if bt.name in self.nonlocals:
                     for _ in range(self.nonlocals[bt.name]):
                         scope, link = scope.master, link+1
+                    link -= self.class_state
                 else:
                     while True:
                         while scope.class_state:
@@ -311,7 +312,6 @@ class State:
                         scope:State = scope.master
                         if scope is None:
                             raise NotImplementedError("Impossible")
-                link -= self.class_state
                 idx:int = scope.full_env.index(bt.name)
                 bt:Bast = BStoreLoadList(bt.err, link, idx, bt.reg, bt.storing)
             fransformed_block.append(bt)
@@ -1083,6 +1083,19 @@ while (i < 100_000_000) {
     i += 1
     if (i&1 == 0) { ... }
     f()
+}
+"""[1:-1], False
+
+    TEST10 = """
+a = b = 1
+class {
+    nonlocal b
+    x = a
+    b = x
+    func() {
+        nonlocal b
+        b
+    }
 }
 """[1:-1], False
 
