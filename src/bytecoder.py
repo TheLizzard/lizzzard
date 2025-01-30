@@ -863,9 +863,10 @@ c = x[1:2]
 d = x[-2:]
 e = x[-2:-1]
 f = x[::-1]
-io.print(18, "\t", a.len()==2, a[0]==1, a[1]==2, b.len()==3, b[0]==3, b[1]==4,
-                   b[2]==5, c.len()==1, c[0]==2, d.len()==2, d[0]==4, d[1]==5,
-                   e.len()==1, e[0]==4, f.len()==5, f[0]==5, f[-1]==1, f[1]==4)
+io.print(5, "\t", a.len()==2, a[0]==1, a[1]==2, b.len()==3, b[0]==3)
+io.print(5, "\t", b[1]==4, b[2]==5, c.len()==1, c[0]==2, d.len()==2)
+io.print(5, "\t", d[0]==4, d[1]==5, e.len()==1, e[0]==4, f.len()==5)
+io.print(3, "\t", f[0]==5, f[-1]==1, f[1]==4)
 
 
 add = /? + ?/
@@ -887,8 +888,9 @@ iseven = func(x) {
 io.print("####### Partial funcs ########")
 io.print(3, "\t", 200==add(120,80), 200==add120(80), 200==add80(60))
 io.print("###### Mutual recursion ######")
-io.print(6, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
-         isodd(1), iseven(0))
+io.print(5, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
+         isodd(1))
+io.print(1, "\t", iseven(0))
 
 
 io.print("#### And/Or short-circuit ####")
@@ -920,11 +922,16 @@ A = class {
     }
     t = X
     if X {a=1}
+    Y = class {
+        Z = class {
+            Δ = 13
+        }
+    }
 }
 io.print(2, "\t", t==5, A.a==1)
 A.X = 6
 A.f(7)
-io.print(2, "\t", t==8, A.X==0)
+io.print(3, "\t", t==8, A.X==0, A.Y.Z.Δ==13)
 
 a = A()
 objects.append(a)
@@ -1003,8 +1010,8 @@ io.print("cpython takes 0.233 sec")
 """[1:-1], True
 
     TEST5 = """
-f = func(x){
-    if (x){
+f = func(x) {
+    if (x) {
         return f(x-1) + 1
     }
     return x
@@ -1014,20 +1021,15 @@ io.print("cpython takes 0.201 sec")
 """[1:-1], False
 
     TEST6 = """
-f = func() {}
-
 A = class {
     A = B = 0
 }
 A.X = 1
-
 while (A.X < 10_000_000) {
-    if (A.X % 2) { f() }
     A.X += 1
 }
-
 io.print("attr++", A.X)
-io.print("cpython takes 1.476 sec")
+io.print("cpython takes 1.120 sec")
 """[1:-1], False
 
     TEST7 = """

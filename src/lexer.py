@@ -325,7 +325,7 @@ class Tokeniser:
                    [Token("\n", stamp, TokenType.OTHER)]
         elif token in "\t ":
             assert self.under.read(1) == token, "Never fails"
-        elif token.isidentifier() or (token == "⊥"):
+        elif token.isidentifier() or (not token.isascii()):
             ident:Token = self.read_identifier()
             if self.under.peek(1) in ("'", '"'):
                 ret:Token = self.read_string(ident.token, type_stamp=stamp)
@@ -334,7 +334,8 @@ class Tokeniser:
         elif token == "?":
             q_mark:Stamp = self.under.stamp()
             self.under.read(1)
-            if self.under.peek(1).isidentifier():
+            next_token:str = self.under.peek(1)
+            if next_token.isidentifier() or (not next_token.isascii()):
                 ident:Token = self.read_identifier()
                 ret:Token = Token("?"+ident.token, q_mark, TokenType.IDENTIFIER)
             else:
@@ -432,7 +433,8 @@ class Tokeniser:
             if not char:
                 break
             ntoken:str = token + char
-            if (not ntoken.isidentifier()) and char.isascii():
+            if (not ntoken.isidentifier()) and char.isascii() and \
+               (not ("0" <= char <= "9")):
                 break
         return Token(token, stamp, TokenType.IDENTIFIER)
 

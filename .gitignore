@@ -174,7 +174,7 @@ src/frontend/lizzzard
 
 # Logs
 src/frontend/log/*
-!src/frontend/log/1.log
+# !src/frontend/log/1.log
 
 # Raytracer testing stuff
 src/code-examples/raytracer/*

@@ -197,19 +197,19 @@ def to_bool_value(boolean):
     return TRUE if boolean else FALSE
 
 @look_inside
-def reg_index(regs, idx):
-    if idx == 0:
+def regs_load(regs, reg):
+    if reg == 0:
         return ZERO
-    elif idx == 1:
+    elif reg == 1:
         return ONE
     else:
-        value = regs[idx]
+        value = regs[reg]
         if value is None:
             raise_error(u"InternalError: trying to load undefined from regs")
         return value
 
 @look_inside
-def reg_store(regs, reg, value):
+def regs_store(regs, reg, value):
     if value is None:
         raise_error(u"InternalError: trying to store undefined inside regs")
     if reg < 1:
@@ -570,34 +570,14 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
             elif isinstance(bt, BLoadLink):
                 assert not ENV_IS_LIST, "Invalid flag/bytecode"
                 raise NotImplementedError("TODO")
-                env_store(env_last(env), bt.name, LinkValue(bt.link))
 
             elif isinstance(bt, BStoreLoadDict):
                 assert not ENV_IS_LIST, "Invalid flag/bytecode"
                 raise NotImplementedError("TODO")
-                """
-                # Get the correct scope
-                scope, value = env, env.get(bt.name, None)
-                if isinstance(value, LinkValue):
-                    for i in range(value.link):
-                        scope_holder = scope[PREV_ENV_IDX]
-                        assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
-                        scope = scope_holder.master
-                    if not bt.storing:
-                        value = scope.get(bt.name, None)
-                # Store/Load variable
-                if bt.storing:
-                    scope[bt.name] = reg_index(regs, bt.reg)
-                else:
-                    while value is None:
-                        scope_holder = scope[PREV_ENV_IDX]
-                        assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
-                        if scope is scope_holder.master:
-                            raise_name_error(bt.name)
-                        scope = scope_holder.master
-                        value = scope[bt.name]
-                    reg_store(regs, bt.reg, value)
-                """
+
+            elif isinstance(bt, BDotDict):
+                assert not ENV_IS_LIST, "Invalid flag/bytecode"
+                raise NotImplementedError("TODO")
 
             elif isinstance(bt, BStoreLoadList):
                 assert ENV_IS_LIST, "Invalid flag/bytecode"
@@ -608,32 +588,25 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     scope = func.masters[len(func.masters)-bt.link]
                 # Store/Load variable
                 if bt.storing:
-                    env_store(scope, bt.name, reg_index(regs, bt.reg))
+                    env_store(scope, bt.name, regs_load(regs, bt.reg))
                 else:
-                    reg_store(regs, bt.reg, env_load(scope, bt.name))
-
-            elif isinstance(bt, BDotDict):
-                assert not ENV_IS_LIST, "Invalid flag/bytecode"
-                obj = reg_index(regs, bt.obj_reg)
-                if not isinstance(obj, ObjectValue):
-                    raise_type_error(u". operator expects object got " + get_type(obj) + u" instead")
-                raise NotImplementedError("TODO")
+                    regs_store(regs, bt.reg, env_load(scope, bt.name))
 
             elif isinstance(bt, BDotList):
                 assert ENV_IS_LIST, "Invalid flag/bytecode"
-                obj = reg_index(regs, bt.obj_reg)
+                obj = regs_load(regs, bt.obj_reg)
                 if isinstance(obj, ListValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX, APPEND_IDX):
                         raise_name_error(u"Unknown attribute")
-                    reg_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
+                    regs_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
                 elif isinstance(obj, StrValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX,):
                         raise_name_error(u"Unknown attribute")
-                    reg_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
+                    regs_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
                 elif isinstance(obj, SpecialValue):
                     if obj.type == u"module":
                         value = None
@@ -652,11 +625,11 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                                 value = global_scope[bt.attr]
                         else:
                             raise_name_error(u"this")
-                        reg_store(regs, bt.reg, value)
+                        regs_store(regs, bt.reg, value)
                     elif obj.type == u"file":
                         if bt.attr not in (READ_IDX, WRITE_IDX, CLOSE_IDX):
                             raise_name_error(u"this")
-                        reg_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
+                        regs_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
                     else:
                         raise_unreachable_error(u"TODO . operator on SpecialValue with obj.type=" + obj.type)
                 elif isinstance(obj, ObjectValue):
@@ -666,7 +639,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     attr_idx = const(attr_idx)
                     assert 0 <= attr_idx < len(cls.attr_vals), "InternalError"
                     if bt.storing:
-                        attr_vals_store(cls.attr_vals, attr_idx, reg_index(regs, bt.reg))
+                        attr_vals_store(cls.attr_vals, attr_idx, regs_load(regs, bt.reg))
                     else:
                         value = attr_vals_load(cls.attr_vals, attr_idx)
                         if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
@@ -677,7 +650,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                                 attr_matrix[obj.type][bt.attr] = (True, attr_idx)
                             attr_vals_extend_until_len(obj.attr_vals, attr_idx+1)
                             attr_vals_store(obj.attr_vals, attr_idx, value)
-                        reg_store(regs, bt.reg, value)
+                        regs_store(regs, bt.reg, value)
                 else:
                     raise_type_error(u". operator expects object got " + get_type(obj) + u" instead")
 
@@ -708,7 +681,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     # Create ObjectValue type
                     _mros = []
                     for base_reg in bt_literal.bases:
-                        base = reg_index(regs, base_reg)
+                        base = regs_load(regs, base_reg)
                         if not isinstance(base, ObjectValue):
                             raise_type_error(u"can't inherit from " + get_type(base))
                         _mros.append(mros[base.type])
@@ -723,23 +696,23 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     literal = ObjectValue(cls_type, bt_literal.name)
                     while len(mros) <= literal.type: mros.append([])
                     mros[literal.type] = hint([literal]+_c3_merge(_mros), promote=True)
-                    reg_store(regs, bt.reg, literal)
+                    regs_store(regs, bt.reg, literal)
                     # Append to stack
                     if STACK_IS_LIST:
                         stack.append((env, func, regs, pc, bt.reg))
                     else:
                         stack = StackFrame(env, func, regs, pc, bt.reg, stack)
-                    regs[CLS_REG] = literal
                     tp = teleports_get(teleports, bt_literal.label)
                     assert isinstance(tp, IntValue), "TypeError"
                     pc, regs = tp.value, list(regs)
+                    regs[CLS_REG] = literal
                     continue
                 else:
                     raise NotImplementedError()
-                reg_store(regs, bt.reg, literal)
+                regs_store(regs, bt.reg, literal)
 
             elif isinstance(bt, BJump):
-                value = reg_index(regs, bt.condition_reg)
+                value = regs_load(regs, bt.condition_reg)
                 if CLEAR_AFTER_USE and (bt.condition_reg > 1):
                     regs[bt.condition_reg] = None
                 condition = force_bool(value)
@@ -754,7 +727,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                                                 attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
 
             elif isinstance(bt, BRegMove):
-                reg_store(regs, bt.reg1, reg_index(regs, bt.reg2))
+                regs_store(regs, bt.reg1, regs_load(regs, bt.reg2))
 
             elif isinstance(bt, BRet):
                 old_pc = pc
@@ -766,7 +739,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     else:
                         regs, pc, stack = stack.regs, stack.pc, stack.prev_stack
                 else:
-                    value = reg_index(regs, bt.reg)
+                    value = regs_load(regs, bt.reg)
                     if not stack:
                         if not isinstance(value, IntValue):
                             raise_type_error(u"exit value should be an int not " + get_type(value))
@@ -774,10 +747,10 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                         break
                     if STACK_IS_LIST:
                         env, func, regs, pc, ret_reg = stack.pop()
-                        reg_store(regs, ret_reg, value)
+                        regs_store(regs, ret_reg, value)
                     else:
                         env, func, regs, pc = stack.env, stack.func, stack.regs, stack.pc
-                        reg_store(regs, stack.ret_reg, value)
+                        regs_store(regs, stack.ret_reg, value)
                         stack = stack.prev_stack
                 # Tell the JIT compiler about the jump
                 if USE_JIT and ENTER_JIT_FUNC_RET:
@@ -787,7 +760,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
 
             elif isinstance(bt, BCall):
                 args = []
-                _func = const(reg_index(regs, bt.regs[1]))
+                _func = const(regs_load(regs, bt.regs[1]))
                 if isinstance(_func, ObjectValue) and (_func.type&1 == 0):
                     self = ObjectValue(_func.type+1, _func.name)
                     while len(mros) <= self.type: mros.append([])
@@ -796,7 +769,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     _func = _func.attr_vals[CONSTRUCTOR_IDX]
                     if _func is None:
                         # Default constructor
-                        reg_store(regs, bt.regs[0], self)
+                        regs_store(regs, bt.regs[0], self)
                         continue
                     if not isinstance(_func, FuncValue):
                         raise_type_error(u"constructor should be a function not " + get_type(_func))
@@ -833,9 +806,9 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                         raise_type_error(u"too few arguments")
                     # Copy arguments values into new regs
                     for i in range(len(args)):
-                        reg_store(regs, i+2, args[i])
+                        regs_store(regs, i+2, args[i])
                     for i in range(2, len(bt.regs)):
-                        reg_store(regs, i+len(args), reg_index(old_regs, bt.regs[i]))
+                        regs_store(regs, i+len(args), regs_load(old_regs, bt.regs[i]))
                     # Tell the JIT compiler about the jump
                     if USE_JIT and ENTER_JIT_FUNC_CALL:
                         jitdriver.can_enter_jit(stack=stack, env=env, func=func, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
@@ -844,14 +817,14 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     op_idx = tp_value - len(bytecode)
                     pure_op = bool(const(_func.env_size))
                     op = BUILTINS[op_idx]
-                    args += [reg_index(regs, bt.regs[i]) for i in range(2,len(bt.regs))]
+                    args += [regs_load(regs, bt.regs[i]) for i in range(2,len(bt.regs))]
                     if op_idx == ISINSTANCE_IDX:
                         value = inner_isinstance(mros, global_scope, args)
                     elif pure_op:
                         value = builtin_pure(op, args, op)
                     else:
                         value = builtin_side(op, args)
-                    reg_store(regs, bt.regs[0], value)
+                    regs_store(regs, bt.regs[0], value)
 
             else:
                 raise NotImplementedError("Haven't implemented this bytecode yet")
@@ -1476,10 +1449,10 @@ def inner_repr(obj):
         bound_obj = obj.bound_obj
         if bound_obj is not None:
             if isinstance(bound_obj, ObjectValue):
-                string += bound_obj.name
+                string += bound_obj.name + u"."
             else:
-                string += get_type(bound_obj) + u"<object>"
-        string += u"." + obj.name + u">"
+                string += get_type(bound_obj) + u"<object>."
+        string += obj.name + u">"
         return string
     elif isinstance(obj, ListValue):
         string = u"["
