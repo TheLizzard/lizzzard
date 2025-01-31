@@ -80,6 +80,7 @@ STR_LITERAL_SIZE = 4 # number of bytes to store a literal string size
 FLOAT_LITERAL_SIZE = STR_LITERAL_SIZE # note that floats are stores as strings
 AST_T_ID_SIZE = 1 # Size of free_ast_id
 NAME_SIZE = 1 # Variable name/bable size
+ARG_SIZE_SIZE = 1 # bytes to store the number of arguments
 
 LINK_SIZE = 1 # number of bytes used to store the link
 ENV_SIZE_SIZE = 2 # number of bytes used to store the env_size of a func
@@ -155,29 +156,36 @@ class Bable(Bast):
 
 
 class BCall(Bast):
-    _immutable_fields_ = ["err", "regs"]
+    _immutable_fields_ = ["err", "regs", "clear"]
     AST_T_ID = free_ast_t_id()
-    __slots__ = "err", "regs"
+    __slots__ = "err", "regs", "clear"
 
-    def __init__(self, err, regs):
+    def __init__(self, err, regs, clear):
         assert isinstance(err, ErrorIdx), "TypeError"
+        assert isinstance(clear, list), "TypeError"
         assert isinstance(regs, list), "TypeError"
         for reg in regs:
             assert isinstance(reg, int), "TypeError"
             assert 0 <= reg < MAX_REG_VALUE, "ValueError"
+        for reg in clear:
+            assert isinstance(reg, int), "TypeError"
+            assert 0 <= reg < MAX_REG_VALUE, "ValueError"
+        self.clear = [const(reg) for reg in clear]
         self.regs = [const(reg) for reg in regs] # regs[0]:=result, regs[1]:=func
         self.err = const(err)
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
-               serialise_list_int(self.regs, 1, REG_SIZE) + \
+               serialise_list_int(self.clear, ARG_SIZE_SIZE, REG_SIZE) + \
+               serialise_list_int(self.regs, ARG_SIZE_SIZE, REG_SIZE) + \
                self.err.serialise()
 
     def derialise(data):
         data = assert_ast_t_id(data, BCall.AST_T_ID)
-        regs, data = derialise_list_int(data, 1, REG_SIZE)
+        clear, data = derialise_list_int(data, ARG_SIZE_SIZE, REG_SIZE)
+        regs, data = derialise_list_int(data, ARG_SIZE_SIZE, REG_SIZE)
         err, data = ErrorIdx.derialise(data)
-        return BCall(err, regs), data
+        return BCall(err, regs, clear), data
 
 
 class BStoreLoadDict(Bast):
@@ -645,7 +653,8 @@ def bytecode_list_to_str(bytecodes, mini=False):
             output += tab + reg_to_str(bt.regs[0]) + u":=" + \
                       reg_to_str(bt.regs[1]) + u"(" + \
                       u",".join([reg_to_str(i) for i in bt.regs[2:]]) + \
-                      u")"
+                      u")[clear=" + \
+                      u",".join([reg_to_str(i) for i in bt.clear]) + u"]"
         elif isinstance(bt, BStoreLoadDict):
             if bt.storing:
                 output += tab + u"name[" + bt.name + u"]:=" + \

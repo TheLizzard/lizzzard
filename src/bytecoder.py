@@ -49,10 +49,14 @@ class Regs:
         self._notify_max_reg(reg)
         return reg
 
-    def free_reg(self, reg:int, instructions:Block) -> None:
+    def free_reg(self, reg:int) -> None:
+        assert 0 <= reg < len(self._taken), "ValueError"
+        assert self._taken[reg], "reg not taken"
+        self.mark_as_free_reg(reg)
+
+    def mark_as_free_reg(self, reg:int) -> None:
         assert 0 <= reg < len(self._taken), "ValueError"
         if reg > 1:
-            assert self._taken[reg], "reg not taken"
             self._taken[reg] = False
 
     def clear_reg(self, reg:int, instructions:Block) -> None:
@@ -263,7 +267,12 @@ class State:
     # Reg helpers
     def free_reg(self, reg:int) -> None:
         assert isinstance(reg, int), "TypeError"
-        self.regs.free_reg(reg, self.block)
+        self.regs.free_reg(reg)
+        self.clear_reg(reg)
+
+    def mark_as_free_reg(self, reg:int) -> None:
+        assert isinstance(reg, int), "TypeError"
+        self.regs.mark_as_free_reg(reg)
         self.clear_reg(reg)
 
     def get_free_reg(self) -> int:
@@ -467,9 +476,10 @@ class ByteCoder:
                                                              "simple_idx=",
                                                              tmp_reg, False))
                             state.append_bast(BCall(op_to_err(cmd),
-                                                    [0,tmp_reg] + args + [reg]))
+                                                    [0,tmp_reg]+args+[reg],
+                                                    clear=args))
                         for _reg in args:
-                            state.free_reg(_reg)
+                            state.mark_as_free_reg(_reg)
                     elif target.op == ".":
                         if not isinstance(target.args[1], Var):
                             raise NotImplementedError("Impossible")
@@ -528,8 +538,8 @@ class ByteCoder:
                 reg:int = self._convert(cmd.args[0], state)
                 state.append_bast(BJump(op_to_err(cmd), label_true.id, reg,
                                         False))
-                state.free_reg(reg)
                 res_reg:int = state.get_free_reg()
+                state.mark_as_free_reg(reg)
                 # If-false
                 tmp_reg:int = self._convert(cmd.args[2], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
@@ -537,7 +547,7 @@ class ByteCoder:
                 state.append_bast(BJump(EMPTY_ERR, label_end.id, 1, False))
                 # If-true
                 state.append_bast(label_true)
-                state.clear_reg(reg)
+                state.mark_as_free_reg(reg)
                 tmp_reg:int = self._convert(cmd.args[1], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
                 state.free_reg(tmp_reg)
@@ -562,7 +572,7 @@ class ByteCoder:
                 state.append_bast(BRegMove(res_reg, tmp_reg))
                 state.append_bast(BJump(op_to_err(cmd), label_or.id, tmp_reg,
                                         negate_if))
-                state.free_reg(tmp_reg)
+                state.mark_as_free_reg(tmp_reg)
                 # Arg 2
                 tmp_reg:int = self._convert(cmd.args[1], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
@@ -571,17 +581,24 @@ class ByteCoder:
                 state.append_bast(label_or)
             else:
                 res_reg:int = state.get_free_reg()
-                used_regs:list[int] = []
-                if cmd.op != "call":
+                used_regs:list[int] = [0]
+                if cmd.op == "call":
+                    for arg in cmd.args[1:]:
+                        reg:int = self._convert(arg, state)
+                        used_regs.append(reg)
+                    reg:int = self._convert(cmd.args[0], state)
+                    used_regs[0] = reg
+                else:
+                    for arg in cmd.args:
+                        reg:int = self._convert(arg, state)
+                        used_regs.append(reg)
                     func:int = state.get_free_reg()
                     state.assert_read(Var(cmd.op), cmd.op, func)
-                    used_regs.append(func)
-                for arg in cmd.args:
-                    reg:int = self._convert(arg, state)
-                    used_regs.append(reg)
-                state.append_bast(BCall(op_to_err(cmd), [res_reg] + used_regs))
+                    used_regs[0] = func
+                state.append_bast(BCall(op_to_err(cmd), [res_reg]+used_regs,
+                                        clear=used_regs))
                 for reg in used_regs:
-                    state.free_reg(reg)
+                    state.mark_as_free_reg(reg)
 
         elif isinstance(cmd, If):
             #   reg := condition
@@ -596,14 +613,14 @@ class ByteCoder:
             label_end:Bable = Bable("if_end_"+str(if_id))
             reg:int = self._convert(cmd.exp, state)
             state.append_bast(BJump(op_to_err(cmd), label_true.id, reg, False))
-            state.free_reg(reg)
+            state.mark_as_free_reg(reg)
             other_state:State = state.copy_for_branch()
             for subcmd in cmd.false:
                 tmp_reg:int = self._convert(subcmd, state)
                 state.free_reg(tmp_reg)
             state.append_bast(BJump(op_to_err(cmd), label_end.id, 1, False))
             state.append_bast(label_true)
-            state.clear_reg(reg)
+            state.mark_as_free_reg(reg)
             for subcmd in cmd.true:
                 tmp_reg:int = self._convert(subcmd, other_state)
                 other_state.free_reg(tmp_reg)
@@ -624,7 +641,7 @@ class ByteCoder:
             state.append_bast(label_start)
             reg:int = self._convert(cmd.exp, state)
             state.append_bast(BJump(op_to_err(cmd), label_end.id, reg, True))
-            state.free_reg(reg)
+            state.mark_as_free_reg(reg)
             state.loop_labels.append((label_start.id, label_end.id))
             other_state:State = state.copy_for_branch()
             for subcmd in cmd.true:
@@ -633,7 +650,7 @@ class ByteCoder:
             state.loop_labels.pop()
             state.append_bast(BJump(EMPTY_ERR, label_start.id, 1, False))
             state.append_bast(label_end)
-            state.clear_reg(reg)
+            state.mark_as_free_reg(reg)
             state.merge_branch(cmd, other_state)
 
         elif isinstance(cmd, Func):
@@ -752,8 +769,9 @@ class ByteCoder:
                                        BLiteral.CLASS_T))
             state.append_bast(BLiteral(op_to_err(cmd), cls_init, cls_init_lit,
                                        BLiteral.FUNC_T))
-            state.append_bast(BCall(op_to_err(cmd), [0,cls_init,res_reg]))
-            state.free_reg(cls_init)
+            state.append_bast(BCall(op_to_err(cmd), [0,cls_init,res_reg],
+                                    clear=[cls_init]))
+            state.mark_as_free_reg(cls_init)
             for base in bases:
                 state.free_reg(base)
             def todo() -> None:

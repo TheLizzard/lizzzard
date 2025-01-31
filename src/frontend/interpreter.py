@@ -1,3 +1,4 @@
+import signal
 import math
 import os
 
@@ -18,6 +19,7 @@ class Value:
 class IntValue(Value):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
+    @look_inside
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
         self.value = value
@@ -27,6 +29,7 @@ BoolValue = IntValue # TODO: implement BoolValue
 class StrValue(Value):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
+    @look_inside
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
         self.value = value
@@ -34,6 +37,7 @@ class StrValue(Value):
 class FloatValue(Value):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
+    @look_inside
     def __init__(self, value):
         assert isinstance(value, float), "TypeError"
         self.value = value
@@ -41,6 +45,8 @@ class FloatValue(Value):
 class FuncValue(Value):
     _immutable_fields_ = ["tp", "masters", "env_size", "nargs", "name", "bound_obj"]
     __slots__ = "tp", "masters", "env_size", "nargs", "name", "bound_obj"
+    @unroll_safe
+    @look_inside
     def __init__(self, tp, masters, env_size, nargs, name, bound_obj):
         if bound_obj is not None:
             assert isinstance(bound_obj, Value), "TypeError"
@@ -61,6 +67,7 @@ class FuncValue(Value):
 class SpecialValue(Value):
     _immutable_fields_ = ["type", "str_value", "int_value"]
     __slots__ = "type", "str_value", "int_value"
+    @look_inside
     def __init__(self, type, str_value=u"", int_value=0):
         assert isinstance(str_value, str), "TypeError"
         assert isinstance(int_value, int), "TypeError"
@@ -69,17 +76,10 @@ class SpecialValue(Value):
         self.int_value = int_value
         self.type = type
 
-class LinkValue(Value):
-    _immutable_fields_ = ["link"]
-    __slots__ = "link"
-    def __init__(self, link):
-        assert isinstance(link, int), "TypeError"
-        assert link > 0, "ValueError"
-        self.link = link
-
 class NoneValue(Value):
     _immutable_fields_ = []
     __slots__ = ()
+    @look_inside
     def __init__(self): pass
 
 class ObjectValue(Value):
@@ -89,12 +89,7 @@ class ObjectValue(Value):
     def __init__(self, type, name):
         assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
         assert isinstance(name, str), "TypeError"
-        if ENV_IS_LIST:
-            self.attr_vals = [None]*len(SPECIAL_ATTRS)
-        else:
-            self.attr_vals = Dict()
-            for name in SPECIAL_ATTRS:
-                self.attr_vals[name] = None
+        self.attr_vals = [None]*len(SPECIAL_ATTRS)
         self.type = type
         self.name = name
 
@@ -103,6 +98,7 @@ class ListValue(Value):
     _immutable_fields_ = ["array"]
     __slots__ = "array"
 
+    @look_inside
     def __init__(self):
         self.array = []
 
@@ -153,8 +149,6 @@ def get_type(value):
         return u"int"
     if isinstance(value, StrValue):
         return u"str"
-    if isinstance(value, LinkValue):
-        return u"link"
     if isinstance(value, ListValue):
         return u"list"
     if isinstance(value, FuncValue):
@@ -174,12 +168,8 @@ def get_type(value):
 
 @look_inside
 def force_bool(val):
-    if val is None:
-        assert False, "InternalError: undefined in regs"
     if val is NONE:
         return False
-    if isinstance(val, LinkValue):
-        assert False, "InternalError: LinkValue in regs"
     if isinstance(val, IntValue):
         return val.value != 0
     if isinstance(val, StrValue):
@@ -197,51 +187,32 @@ def to_bool_value(boolean):
     return TRUE if boolean else FALSE
 
 @look_inside
-def regs_load(regs, reg):
-    if reg == 0:
-        return ZERO
-    elif reg == 1:
-        return ONE
-    else:
-        value = regs[reg]
-        if value is None:
-            raise_error(u"InternalError: trying to load undefined from regs")
-        return value
-
-@look_inside
-def regs_store(regs, reg, value, chk=True):
-    if const(chk) and (value is None):
-        raise_error(u"InternalError: trying to store undefined inside regs")
-    if reg < 1:
-        return # Don't store in regs 0 or 1
-    assert reg < const(len(regs)), "InternalError"
-    regs[reg] = value
-
-@look_inside
 def env_load(env, idx):
     assert isinstance(env, ENV_TYPE), "TypeError"
-    if ENV_IS_LIST:
-        assert idx < const(len(env)), "InternalError"
+    if idx == 0:
+        return ZERO
+    if idx == 1:
+        return ONE
+    assert idx < const(len(env)), "InternalError"
     value = env[idx]
     if value is None:
         raise_error(u"InternalError: trying to load undefined from env")
     return value
 
 @look_inside
-def env_store(env, idx, value):
+def env_store(env, idx, value, chk=True):
     assert isinstance(env, ENV_TYPE), "TypeError"
-    if value is None:
+    if (value is None) and chk:
         raise_error(u"InternalError: trying to store undefined inside env")
-    if ENV_IS_LIST:
-        assert idx < const(len(env)), "InternalError"
+    assert idx < const(len(env)), "InternalError"
     env[idx] = value
 
 @look_inside
-def attr_vals_load(attr_vals, idx):
+def attr_vals_load(attr_vals, idx, chk=True):
     assert isinstance(attr_vals, list), "TypeError"
     assert idx < len(attr_vals), "InternalError"
     value = attr_vals[idx]
-    if value is None:
+    if (value is None) and chk:
         raise_error(u"InternalError: trying to load undefined from attrs")
     return value
 
@@ -252,6 +223,7 @@ def attr_vals_store(attr_vals, idx, value):
     assert idx < len(attr_vals), "InternalError"
     attr_vals[idx] = value
 
+@unroll_safe
 @look_inside
 def attr_vals_extend_until_len(attr_vals, new_length):
     assert isinstance(attr_vals, list), "TypeError"
@@ -374,45 +346,44 @@ class VirtualisableArray:
 
 
 ENV_IS_LIST = True
-STACK_IS_LIST = False
+STACK_IS_LIST = False # if TRUE: super slow on raytracer
 ENV_IS_VIRTUALISABLE = False
 
-if ENV_IS_LIST:
-    if ENV_IS_VIRTUALISABLE:
-        raise NotImplementedError("Very unsafe - `fib` breaks if VirtualisableArray is used. More info in version 1.3.5 commit message")
-        ENV_TYPE = VirtualisableArray
-    else:
-        ENV_TYPE = list
-else:
+if not ENV_IS_LIST:
     assert not ENV_IS_VIRTUALISABLE, "Invalid compile settings"
-    ENV_TYPE = Dict
+    raise NotImplementedError("No longer supported")
+if ENV_IS_VIRTUALISABLE:
+    if ENTER_JIT_FUNC_CALL or ENTER_JIT_FUNC_RET:
+        raise NotImplementedError("ENV_IS_VIRTUALISABLE breaks the interpreter if either ENTER_JIT_FUNC_CALL or ENTER_JIT_FUNC_RET")
+    raise NotImplementedError("This doesn't work no matter what settings I provide :/")
+    ENV_TYPE = VirtualisableArray
+else:
+    ENV_TYPE = list
 
 if USE_JIT:
-    def get_location(_, pc, bytecode, *__):
+    def get_location(_, __, pc, bytecode, *___):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
     virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
-    jitdriver = JitDriver(greens=["CLEAR_AFTER_USE", "pc","bytecode","teleports","SOURCE_CODE"],
-                          reds=["next_cls_type","stack","env","func","regs","attr_matrix","attrs","lens","mros","global_scope"],
+    jitdriver = JitDriver(greens=["CLEAR_AFTER_USE","frame_size","pc","bytecode","teleports","SOURCE_CODE"],
+                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","mros","global_scope"],
                           virtualizables=virtualizables, get_printable_location=get_location)
 
 
 # Stack linked list
 class StackFrame:
-    _immutable_fields_ = ["env", "regs", "pc", "func", "ret_reg", "prev_stack"]
-    __slots__ = "env", "regs", "pc", "func", "ret_reg", "prev_stack"
+    _immutable_fields_ = ["env", "pc", "func", "ret_reg", "prev_stack"]
+    __slots__ = "env", "pc", "func", "ret_reg", "prev_stack"
 
     # @look_inside
-    def __init__(self, env, func, regs, pc, ret_reg, prev_stack):
+    def __init__(self, env, func, pc, ret_reg, prev_stack):
         assert isinstance(func, FuncValue), "TypeError"
         assert isinstance(env, ENV_TYPE), "TypeError"
         assert isinstance(ret_reg, int), "TypeError"
-        assert isinstance(regs, list), "TypeError"
         assert isinstance(pc, int), "TypeError"
         if prev_stack is not None:
             assert isinstance(prev_stack, StackFrame), "TypeError"
         self.env = env
-        self.regs = regs
         self.pc = pc
         self.func = func
         self.ret_reg = ret_reg
@@ -461,8 +432,8 @@ def data_from_err_idx(code, err):
     assert size > 0, "InternalError"
     return err.start[0], line_str, start, size, True
 
-@look_inside
 @unroll_safe
+@look_inside
 def mul_isinstance(obj, classes):
     assert isinstance(classes, list), "TypeError"
     for Cls in classes:
@@ -495,51 +466,35 @@ class InterpreterError(Exception):
 
 # Main interpreter
 def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE):
-    global ENV_IS_LIST
-    if ENV_IS_LIST != flags.is_set("ENV_IS_LIST"):
-        if PYTHON == 3:
-            global ENV_TYPE
-            ENV_IS_LIST = flags.is_set("ENV_IS_LIST")
-            if ENV_IS_LIST:
-                if ENV_IS_VIRTUALISABLE:
-                    ENV_TYPE = VirtualisableArray
-                else:
-                    ENV_TYPE = list
-            else:
-                ENV_TYPE = Dict
-        else:
-            if ENV_IS_LIST:
-                print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST but the clizz file wasn't\x1b[0m")
-            else:
-                print("\x1b[91m[ERROR]: The interpreter was compiled with ENV_IS_LIST==false but the clizz file uses ENV_IS_LIST\x1b[0m")
-            raise SystemExit()
+    if not flags.is_set("ENV_IS_LIST"):
+        print("\x1b[91m[ERROR]: ENV_IS_LIST==false is not longer supported\x1b[0m")
+        raise SystemExit()
+    if frame_size <= 0:
+        print("\x1b[91m[ERROR]: Invalid frame_size in bytecode\x1b[0m")
+        raise SystemExit()
     # Create teleports
     teleports = Dict()
     for i, bt in enumerate(bytecode):
         if isinstance(bt, Bable):
             teleports[const_str(bt.id)] = IntValue(i)
-    # Create regs
-    regs = [None]*(frame_size+2)
     # Create env
-    if ENV_IS_LIST:
-        if ENV_IS_VIRTUALISABLE:
-            env = VirtualisableArray(env_size)
-        else:
-            env = [None]*env_size
-        envs = hint([env], promote=True)
-        for i, op in enumerate(BUILTINS):
-            assert isinstance(op, str), "TypeError"
-            pure_op = op not in BUILTIN_MODULE_SIDES
-            env[i] = FuncValue(i+len(bytecode), envs, pure_op, 0, op, None)
-        for i, op in enumerate(BUILTIN_MODULES):
-            assert isinstance(op, str), "TypeError"
-            env[i+len(MODULE_ATTRS)] = SpecialValue(u"module", str_value=op)
+    # Note that regs is env[:frame_size]
+    if ENV_IS_VIRTUALISABLE:
+        env = VirtualisableArray(env_size + frame_size + 2)
     else:
-        raise NotImplementedError("TODO")
+        env = [None]*(env_size + frame_size + 2)
+    envs = hint([env], promote=True)
+    for i, op in enumerate(BUILTINS):
+        assert isinstance(op, str), "TypeError"
+        pure_op = op not in BUILTIN_MODULE_SIDES
+        env[i+frame_size] = FuncValue(i+len(bytecode), envs, pure_op, 0, op, None)
+    for i, op in enumerate(BUILTIN_MODULES):
+        assert isinstance(op, str), "TypeError"
+        env[i+frame_size+len(MODULE_ATTRS)] = SpecialValue(u"module", str_value=op)
     # Start actual interpreter
-    return _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE)
+    return _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size)
 
-def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
+def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
     CLEAR_AFTER_USE = const(flags.is_set("CLEAR_AFTER_USE"))
     SOURCE_CODE = const_str(SOURCE_CODE)
     pc = 0 # current instruction being executed
@@ -550,10 +505,11 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
     mros = hint([], promote=True)
     func = FuncValue(0, [], 0, 0, u"main-scope", None)
     global_scope = hint(env, promote=True)
+    frame_size = const(frame_size)
 
     while pc < len(bytecode):
         if USE_JIT:
-            jitdriver.jit_merge_point(stack=stack, env=env, func=func, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
+            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
                                       attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
@@ -564,53 +520,43 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
             if isinstance(bt, Bable):
                 pass
 
-            elif isinstance(bt, BLoadLink):
-                assert not ENV_IS_LIST, "Invalid flag/bytecode"
-                raise NotImplementedError("TODO")
-
-            elif isinstance(bt, BStoreLoadDict):
-                assert not ENV_IS_LIST, "Invalid flag/bytecode"
-                raise NotImplementedError("TODO")
-
-            elif isinstance(bt, BDotDict):
-                assert not ENV_IS_LIST, "Invalid flag/bytecode"
-                raise NotImplementedError("TODO")
-
             elif isinstance(bt, BStoreLoadList):
-                assert ENV_IS_LIST, "Invalid flag/bytecode"
                 # Get the correct scope
                 if bt.link == 0:
                     scope = env
                 else:
-                    scope = func.masters[len(func.masters)-bt.link]
+                    idx = len(func.masters)-bt.link
+                    if idx == 0:
+                        scope = global_scope
+                    else:
+                        scope = func.masters[idx]
                 # Store/Load variable
                 if bt.storing:
-                    env_store(scope, bt.name, regs_load(regs, bt.reg))
+                    env_store(scope, bt.name+frame_size, env_load(env, bt.reg))
                 else:
-                    regs_store(regs, bt.reg, env_load(scope, bt.name))
+                    env_store(env, bt.reg, env_load(scope, bt.name+frame_size))
 
             elif isinstance(bt, BDotList):
-                assert ENV_IS_LIST, "Invalid flag/bytecode"
-                obj = regs_load(regs, bt.obj_reg)
+                obj = env_load(env, bt.obj_reg)
                 if isinstance(obj, ListValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX, APPEND_IDX):
                         raise_name_error(u"Unknown attribute")
-                    regs_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
+                    env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, StrValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX,):
                         raise_name_error(u"Unknown attribute")
-                    regs_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
+                    env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, SpecialValue):
                     if obj.type == u"module":
                         value = None
                         if obj.str_value == u"io":
                             if bt.attr not in (PRINT_IDX, OPEN_IDX):
                                 raise_name_error(u"this")
-                            value = global_scope[bt.attr]
+                            value = global_scope[bt.attr+frame_size]
                         elif obj.str_value == u"math":
                             if bt.attr == PI_IDX:
                                 value = PI
@@ -619,14 +565,14 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                             else:
                                 if bt.attr not in (SQRT_IDX, SIN_IDX, COS_IDX, TAN_IDX, POW_IDX):
                                     raise_name_error(u"this")
-                                value = global_scope[bt.attr]
+                                value = global_scope[bt.attr+frame_size]
                         else:
                             raise_name_error(u"this")
-                        regs_store(regs, bt.reg, value)
+                        env_store(env, bt.reg, value)
                     elif obj.type == u"file":
                         if bt.attr not in (READ_IDX, WRITE_IDX, CLOSE_IDX):
                             raise_name_error(u"this")
-                        regs_store(regs, bt.reg, copy_and_bind_func(global_scope[bt.attr], obj))
+                        env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
                     else:
                         raise_unreachable_error(u"TODO . operator on SpecialValue with obj.type=" + obj.type)
                 elif isinstance(obj, ObjectValue):
@@ -636,7 +582,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     attr_idx = const(attr_idx)
                     assert 0 <= attr_idx < len(cls.attr_vals), "InternalError"
                     if bt.storing:
-                        attr_vals_store(cls.attr_vals, attr_idx, regs_load(regs, bt.reg))
+                        attr_vals_store(cls.attr_vals, attr_idx, env_load(env, bt.reg))
                     else:
                         value = attr_vals_load(cls.attr_vals, attr_idx)
                         if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
@@ -647,7 +593,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                                 attr_matrix[obj.type][bt.attr] = (True, attr_idx)
                             attr_vals_extend_until_len(obj.attr_vals, attr_idx+1)
                             attr_vals_store(obj.attr_vals, attr_idx, value)
-                        regs_store(regs, bt.reg, value)
+                        env_store(env, bt.reg, value)
                 else:
                     raise_type_error(u". operator expects object got " + get_type(obj) + u" instead")
 
@@ -674,7 +620,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                 elif bt.type == BLiteral.NONE_T:
                     literal = NONE
                 elif bt.type == BLiteral.UNDEFINED_T:
-                    regs_store(regs, bt.reg, None, chk=False)
+                    env_store(env, bt.reg, None, chk=False)
                     continue
                 elif bt.type == BLiteral.LIST_T:
                     literal = ListValue()
@@ -683,7 +629,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     # Create ObjectValue type
                     _mros = []
                     for base_reg in bt_literal.bases:
-                        base = regs_load(regs, base_reg)
+                        base = env_load(env, base_reg)
                         if not isinstance(base, ObjectValue):
                             raise_type_error(u"can't inherit from " + get_type(base))
                         _mros.append(mros[base.type])
@@ -700,12 +646,14 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     mros[literal.type] = hint([literal]+_c3_merge(_mros), promote=True)
                 else:
                     raise NotImplementedError()
-                regs_store(regs, bt.reg, literal)
+                env_store(env, bt.reg, literal)
 
             elif isinstance(bt, BJump):
-                value = regs_load(regs, bt.condition_reg)
+                value = env_load(env, bt.condition_reg)
                 if CLEAR_AFTER_USE and (bt.condition_reg > 1):
-                    regs_store(regs, bt.condition_reg, None, chk=False)
+                    env_store(env, bt.condition_reg, None, chk=False)
+                if value is None:
+                    raise_unreachable_error(u"undefined should never be in regs")
                 condition = force_bool(value)
                 # if condition != bt.negated: # RPython's JIT can't constant fold in this form :/
                 if (condition and (not bt.negated)) or ((not condition) and bt.negated):
@@ -713,46 +661,46 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     assert isinstance(tp, IntValue), "TypeError"
                     old_pc, pc = pc, tp.value
                     assert isinstance(bytecode[pc], Bable), "InternalError"
-                    if USE_JIT and (pc < old_pc):
-                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
+                    if USE_JIT and (pc < old_pc): # Tell the JIT about the jump
+                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
                                                 attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
 
             elif isinstance(bt, BRegMove):
-                regs_store(regs, bt.reg1, regs_load(regs, bt.reg2))
+                env_store(env, bt.reg1, env_load(env, bt.reg2))
 
             elif isinstance(bt, BRet):
                 old_pc = pc
-                value = regs_load(regs, bt.reg)
+                value = env_load(env, bt.reg)
+                env_store(env, bt.reg, None, chk=False)
                 if not stack:
                     if not isinstance(value, IntValue):
                         raise_type_error(u"exit value should be an int not " + get_type(value))
                     print(u"[EXIT]: " + int_to_str(value.value))
                     break
                 if STACK_IS_LIST:
-                    env, func, regs, pc, ret_reg = stack.pop()
-                    regs_store(regs, ret_reg, value)
+                    env, func, pc, ret_reg = stack.pop()
                 else:
-                    env, func, regs, pc = stack.env, stack.func, stack.regs, stack.pc
-                    regs_store(regs, stack.ret_reg, value)
+                    env, func, pc, ret_reg = stack.env, stack.func, stack.pc, stack.ret_reg
                     stack = stack.prev_stack
-                # Tell the JIT compiler about the jump
-                if USE_JIT and ENTER_JIT_FUNC_RET:
-                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
+                env_store(env, const(ret_reg), value)
+                if USE_JIT and ENTER_JIT_FUNC_RET: # Tell the JIT about the jump
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
                                             attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
-                # env, func, regs, stack = hint(env, promote=True), hint(func, promote=True), hint(regs, promote=True), hint(stack, promote=True)
+                func = hint(func, promote=True)
 
             elif isinstance(bt, BCall):
                 args = []
-                _func = const(regs_load(regs, bt.regs[1]))
+                _func = env_load(env, bt.regs[1])
+                _func = hint(_func, promote=True)
                 if isinstance(_func, ObjectValue) and (_func.type&1 == 0):
                     self = ObjectValue(_func.type+1, _func.name)
                     while len(mros) <= self.type: mros.append([])
                     mros[self.type] = hint(mros[_func.type], promote=True)
                     args = [self]
-                    _func = _func.attr_vals[CONSTRUCTOR_IDX]
+                    _func = const(_func.attr_vals[CONSTRUCTOR_IDX])
                     if _func is None:
                         # Default constructor
-                        regs_store(regs, bt.regs[0], self)
+                        env_store(env, bt.regs[0], self)
                         continue
                     if not isinstance(_func, FuncValue):
                         raise_type_error(u"constructor should be a function not " + get_type(_func))
@@ -762,48 +710,56 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                 else:
                     raise_type_error(get_type(_func) + u" is not callable")
 
-                tp_value = const(_func.tp)
+                tp_value = _func.tp
                 if tp_value < len(bytecode):
+                    func = const(func) # No idea why I need this :/
                     # Create a new stack frame
                     if STACK_IS_LIST:
-                        stack.append((env, func, regs, pc, bt.regs[0]))
+                        stack.append((env, func, pc, bt.regs[0]))
                     else:
-                        stack = StackFrame(env, func, regs, pc, bt.regs[0], stack)
-                    # Set the pc/regs/env/func
-                    func, old_pc, pc, old_regs, regs = _func, pc, tp_value, regs, [None]*const(len(regs))
-                    if ENV_IS_LIST:
-                        if ENV_IS_VIRTUALISABLE:
-                            env = VirtualisableArray(func.env_size)
-                        else:
-                            env = [None]*func.env_size
+                        stack = StackFrame(env, func, pc, bt.regs[0], stack)
+                    # Set the pc/env/func
+                    func, old_pc, pc, old_env = _func, pc, tp_value, env
+                    if ENV_IS_VIRTUALISABLE:
+                        env = VirtualisableArray(func.env_size+frame_size)
                     else:
-                        raise NotImplementedError("TODO")
+                        env = [None]*(func.env_size+frame_size)
                     # Check number of args
                     if len(bt.regs)-2+len(args) > func.nargs:
                         raise_type_error(u"too many arguments")
                     elif len(bt.regs)-2+len(args) < func.nargs:
                         raise_type_error(u"too few arguments")
-                    # Copy arguments values into new regs
+                    # Copy arguments values into new env
                     for i in range(len(args)):
-                        regs_store(regs, i+2, args[i])
+                        env_store(env, i+2, args[i])
                     for i in range(2, len(bt.regs)):
-                        regs_store(regs, i+len(args), regs_load(old_regs, bt.regs[i]))
-                    # Tell the JIT compiler about the jump
-                    if USE_JIT and ENTER_JIT_FUNC_CALL:
-                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
-                                                attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+                        env_store(env, i+len(args), env_load(old_env, bt.regs[i]))
+                    enter_jit = ENTER_JIT_FUNC_CALL
                 else: # Built-ins
                     op_idx = tp_value - len(bytecode)
-                    pure_op = bool(const(_func.env_size))
+                    pure_op = bool(_func.env_size)
                     op = BUILTINS[op_idx]
-                    args += [regs_load(regs, bt.regs[i]) for i in range(2,len(bt.regs))]
+                    args += [env_load(env, bt.regs[i]) for i in range(2,len(bt.regs))]
+                    for arg in args:
+                        if arg is None:
+                            raise_unreachable_error(u"undefined should never be in regs")
                     if op_idx == ISINSTANCE_IDX:
-                        value = inner_isinstance(mros, global_scope, args)
+                        value = inner_isinstance(mros, global_scope, frame_size, args)
                     elif pure_op:
                         value = builtin_pure(op, args, op)
                     else:
                         value = builtin_side(op, args)
-                    regs_store(regs, bt.regs[0], value)
+                    env_store(env, bt.regs[0], value)
+                    enter_jit, old_env = False, env
+                # Clear the regs in bt.clear
+                for reg in bt.clear:
+                    env_store(old_env, reg, None, chk=False)
+                if USE_JIT and enter_jit: # Tell the JIT about the jump
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+
+            elif isinstance(bt, BLoadLink) or isinstance(bt, BStoreLoadDict) or isinstance(bt, BDotDict):
+                raise_unreachable_error(u"ENV_IS_LIST==false is not longer supported so this bytecode instruction is illegal")
 
             else:
                 raise NotImplementedError("Haven't implemented this bytecode yet")
@@ -837,22 +793,23 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
     return 0
 
 
+@unroll_safe
 @look_inside
-def inner_isinstance(mros, global_scope, args):
+def inner_isinstance(mros, global_scope, frame_size, args):
     if len(args) != 2:
         raise_type_error(u"isinstance takes 2 arguments")
     instance, cls = args
     if isinstance(cls, FuncValue):
         output = False
-        if cls is const(global_scope[INT_IDX]):
+        if cls is const(global_scope[INT_IDX+frame_size]):
             output = isinstance(instance, IntValue)
-        elif cls is const(global_scope[FLOAT_IDX]):
+        elif cls is const(global_scope[FLOAT_IDX+frame_size]):
             output = isinstance(instance, IntValue) or isinstance(instance, FloatValue)
-        elif cls is const(global_scope[STR_IDX]):
+        elif cls is const(global_scope[STR_IDX+frame_size]):
             output = isinstance(instance, StrValue)
-        elif cls is const(global_scope[LIST_IDX]):
+        elif cls is const(global_scope[LIST_IDX+frame_size]):
             output = isinstance(instance, ListValue)
-        elif cls is const(global_scope[BOOL_IDX]):
+        elif cls is const(global_scope[BOOL_IDX+frame_size]):
             output = isinstance(instance, BoolValue)
         else:
             raise_type_error(u"the 2nd argument of isinstance should be a type or a list of types")
@@ -871,7 +828,7 @@ def inner_isinstance(mros, global_scope, args):
         return FALSE
     elif isinstance(cls, ListValue):
         for subcls in cls.array:
-            if inner_isinstance(mros, global_scope, [instance, subcls]):
+            if inner_isinstance(mros, global_scope, frame_size, [instance, subcls]):
                 return TRUE
         return FALSE
     else:
@@ -1040,6 +997,7 @@ def builtin_pure_list(op, args, op_print):
             raise_unreachable_error(u"builtin-pure-list " + op + u" not implemented")
 
 
+@unroll_safe
 @look_inside
 def builtin_pure_nonlist(op, args, op_print):
     if op == u"+":
@@ -1655,5 +1613,9 @@ if __name__ == "__main__":
 # https://www.hpi.uni-potsdam.de/hirschfeld/publications/media/Pape_2021_EfficientCompoundValuesInVirtualMachines_Dissertation.pdf
 # /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/rlib/jit.py
 # https://github.com/pypy/pypy/issues/5166
+# https://github.com/pypy/pypy/issues/5181
+# https://github.com/pypy/pypy/issues/5184
 # https://rpython.readthedocs.io/en/latest/jit/optimizer.html
 # /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/jit/metainterp/optimizeopt
+# https://github.com/hanabi1224/Programming-Language-Benchmarks/tree/main
+# https://en.wikipedia.org/wiki/Comparison_of_functional_programming_languages
