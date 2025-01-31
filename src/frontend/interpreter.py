@@ -518,9 +518,6 @@ def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE):
     for i, bt in enumerate(bytecode):
         if isinstance(bt, Bable):
             teleports[const_str(bt.id)] = IntValue(i)
-    for i, op in enumerate(BUILTINS):
-        i += len(bytecode)
-        teleports[const_str(int_to_str(i))] = IntValue(i)
     # Create regs
     regs = [None]*(frame_size+2)
     # Create env
@@ -661,8 +658,13 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     literal = IntValue(bt_literal.value)
                 elif bt.type == BLiteral.FUNC_T:
                     assert isinstance(bt_literal, BLiteralFunc), "TypeError"
-                    envs_copy = hint(func.masters+[env], promote=True)
-                    literal = FuncValue(bt_literal.value, envs_copy, bt_literal.env_size, bt_literal.nargs, bt_literal.name, None)
+                    if bt_literal.link == 0:
+                        master = env
+                    else:
+                        master = func.masters[len(func.masters)-bt_literal.link]
+                    tp = teleports[bt_literal.tp_label]
+                    assert isinstance(tp, IntValue), "InternalError"
+                    literal = FuncValue(tp.value, func.masters+[master], bt_literal.env_size, bt_literal.nargs, bt_literal.name, None)
                 elif bt.type == BLiteral.STR_T:
                     assert isinstance(bt_literal, BLiteralStr), "TypeError"
                     literal = StrValue(bt_literal.value)
@@ -696,17 +698,6 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                     literal = ObjectValue(cls_type, bt_literal.name)
                     while len(mros) <= literal.type: mros.append([])
                     mros[literal.type] = hint([literal]+_c3_merge(_mros), promote=True)
-                    regs_store(regs, bt.reg, literal)
-                    # Append to stack
-                    if STACK_IS_LIST:
-                        stack.append((env, func, regs, pc, bt.reg))
-                    else:
-                        stack = StackFrame(env, func, regs, pc, bt.reg, stack)
-                    tp = teleports_get(teleports, bt_literal.label)
-                    assert isinstance(tp, IntValue), "TypeError"
-                    pc, regs = tp.value, list(regs)
-                    regs_store(regs, CLS_REG, literal)
-                    continue
                 else:
                     raise NotImplementedError()
                 regs_store(regs, bt.reg, literal)
@@ -731,27 +722,19 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
 
             elif isinstance(bt, BRet):
                 old_pc = pc
-                if bt.capture_env:
-                    if not stack:
-                        raise NotImplementedError("Impossible")
-                    if STACK_IS_LIST:
-                        _, _, regs, pc, ret_reg = stack.pop()
-                    else:
-                        regs, pc, stack = stack.regs, stack.pc, stack.prev_stack
+                value = regs_load(regs, bt.reg)
+                if not stack:
+                    if not isinstance(value, IntValue):
+                        raise_type_error(u"exit value should be an int not " + get_type(value))
+                    print(u"[EXIT]: " + int_to_str(value.value))
+                    break
+                if STACK_IS_LIST:
+                    env, func, regs, pc, ret_reg = stack.pop()
+                    regs_store(regs, ret_reg, value)
                 else:
-                    value = regs_load(regs, bt.reg)
-                    if not stack:
-                        if not isinstance(value, IntValue):
-                            raise_type_error(u"exit value should be an int not " + get_type(value))
-                        print(u"[EXIT]: " + int_to_str(value.value))
-                        break
-                    if STACK_IS_LIST:
-                        env, func, regs, pc, ret_reg = stack.pop()
-                        regs_store(regs, ret_reg, value)
-                    else:
-                        env, func, regs, pc = stack.env, stack.func, stack.regs, stack.pc
-                        regs_store(regs, stack.ret_reg, value)
-                        stack = stack.prev_stack
+                    env, func, regs, pc = stack.env, stack.func, stack.regs, stack.pc
+                    regs_store(regs, stack.ret_reg, value)
+                    stack = stack.prev_stack
                 # Tell the JIT compiler about the jump
                 if USE_JIT and ENTER_JIT_FUNC_RET:
                     jitdriver.can_enter_jit(stack=stack, env=env, func=func, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE,
@@ -779,11 +762,7 @@ def _interpret(bytecode, teleports, regs, env, attrs, flags, SOURCE_CODE):
                 else:
                     raise_type_error(get_type(_func) + u" is not callable")
 
-                tp = const(teleports[int_to_str(_func.tp)])
-                if tp is None:
-                    raise_name_error(_func.name)
-                assert isinstance(tp, IntValue), "TypeError"
-                tp_value = const(tp.value)
+                tp_value = const(_func.tp)
                 if tp_value < len(bytecode):
                     # Create a new stack frame
                     if STACK_IS_LIST:

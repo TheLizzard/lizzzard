@@ -252,6 +252,14 @@ class State:
                 used_token.double_throw(msg1, msg2, token)
             self.uses[name] = (token, True)
 
+    def get_class_chain(self) -> int:
+        state:State = self
+        link:int = 0
+        while state.class_state:
+            state:State = state.master
+            link += 1
+        return link
+
     # Reg helpers
     def free_reg(self, reg:int) -> None:
         assert isinstance(reg, int), "TypeError"
@@ -301,7 +309,6 @@ class State:
                 if bt.name in self.nonlocals:
                     for _ in range(self.nonlocals[bt.name]):
                         scope, link = scope.master, link+1
-                    link -= self.class_state
                 else:
                     while True:
                         while scope.class_state:
@@ -312,6 +319,7 @@ class State:
                         scope:State = scope.master
                         if scope is None:
                             raise NotImplementedError("Impossible")
+                    link += self.class_state
                 idx:int = scope.full_env.index(bt.name)
                 bt:Bast = BStoreLoadList(bt.err, link, idx, bt.reg, bt.storing)
             fransformed_block.append(bt)
@@ -392,7 +400,7 @@ class ByteCoder:
         with main_state.get_free_reg_wrapper() as tmp_reg:
             main_state.append_bast(BLiteral(EMPTY_ERR, tmp_reg, BLiteralInt(0),
                                             BLiteral.INT_T))
-            main_state.append_bast(BRet(EMPTY_ERR, tmp_reg, False))
+            main_state.append_bast(BRet(EMPTY_ERR, tmp_reg))
         main_state.fransform_func()
         while self._todo:
             self._todo.pop(0)()
@@ -630,11 +638,14 @@ class ByteCoder:
 
         elif isinstance(cmd, Func):
             func_id:int = self._labels.get_fl()
+            label:str = f"func_{name.lower()}_{func_id}"
             # <INSTRUCTIONS>:
             #   res_reg := func_label
             res_reg:int = state.get_free_reg()
-            func_literal:BLiteralFunc = BLiteralFunc(0, func_id, len(cmd.args),
-                                                     name)
+            link:int = state.get_class_chain()
+            func_literal:BLiteralFunc = BLiteralFunc(0, label, len(cmd.args),
+                                                     name, link)
+            link:int = state.get_class_chain()
             state.append_bast(BLiteral(op_to_err(cmd), res_reg, func_literal,
                                        BLiteral.FUNC_T))
             is_constructor:bool = state.class_state and \
@@ -644,7 +655,7 @@ class ByteCoder:
                 # label_start:
                 #   <copy args>
                 #   <function-body>
-                label_start:Bable = Bable(f"{func_id}")
+                label_start:Bable = Bable(label)
                 nstate:State = state.copy_for_func()
                 self._states.append(nstate)
                 nstate.append_bast(label_start)
@@ -658,7 +669,7 @@ class ByteCoder:
                     if (i == len(cmd.body)-1) and isinstance(subcmd, Expr):
                         # If last cmd is an Expr and not constructor, return it
                         if not is_constructor:
-                            nstate.append_bast(BRet(EMPTY_ERR, tmp_reg, False))
+                            nstate.append_bast(BRet(EMPTY_ERR, tmp_reg))
                     nstate.free_reg(tmp_reg)
                 if not nstate.must_ret: # return `none` or `self`
                     if is_constructor:
@@ -668,7 +679,7 @@ class ByteCoder:
                                                           arg_name, reg, False))
                     else:
                         reg:int = nstate.get_none_reg()
-                    nstate.append_bast(BRet(EMPTY_ERR, reg, False))
+                    nstate.append_bast(BRet(EMPTY_ERR, reg))
                 nstate.fransform_func()
                 func_literal.env_size = len(nstate.full_env)
             # Convert the Func to bytecode after the rest of the code in the
@@ -704,7 +715,7 @@ class ByteCoder:
                     reg:int = state.get_none_reg()
                 else:
                     reg:int = self._convert(cmd.exp, state)
-                state.append_bast(BRet(op_to_err(cmd), reg, False))
+                state.append_bast(BRet(op_to_err(cmd), reg))
                 state.free_reg(reg)
                 state.must_ret:bool = True # Must be at the end
             else:
@@ -728,13 +739,21 @@ class ByteCoder:
 
         elif isinstance(cmd, Class):
             res_reg:int = state.get_free_reg()
-            label:str = f"class_{self._labels.get_fl()}"
+            cls_init:int = state.get_free_reg()
+            cls_label_id:int = self._labels.get_fl()
+            label:str = f"cls_{name.lower()}_{cls_label_id}"
             bases:list[Reg] = []
             for base in cmd.bases:
                 bases.append(self._convert(base, state))
-            cls_literal:BLiteralClass = BLiteralClass(bases, label, name)
+            link:int = state.get_class_chain()
+            cls_literal:BLiteralClass = BLiteralClass(bases, name)
+            cls_init_lit:BLiteralFunc = BLiteralFunc(0, label, 1, label, link)
             state.append_bast(BLiteral(op_to_err(cmd), res_reg, cls_literal,
                                        BLiteral.CLASS_T))
+            state.append_bast(BLiteral(op_to_err(cmd), cls_init, cls_init_lit,
+                                       BLiteral.FUNC_T))
+            state.append_bast(BCall(op_to_err(cmd), [0,cls_init,res_reg]))
+            state.free_reg(cls_init)
             for base in bases:
                 state.free_reg(base)
             def todo() -> None:
@@ -745,7 +764,7 @@ class ByteCoder:
                 for assignment in cmd.body:
                     self._convert(assignment, nstate)
                 nstate.free_reg(cls_obj_reg)
-                nstate.append_bast(BRet(op_to_err(cmd), 0, True))
+                nstate.append_bast(BRet(op_to_err(cmd), 0))
                 nstate.fransform_class()
             # self._todo.append(todo)
             todo()
@@ -1035,12 +1054,12 @@ io.print("cpython takes 1.120 sec")
     TEST7 = """
 f = func(x) {
     if (x) {
-        return f(x-1) + ""
+        return f(x-1) + 1
     }
-    return x
+    return x + ""
 }
 
-f(3)
+f(2)
 """[1:-1], False
 
     TEST9 = """
@@ -1088,15 +1107,19 @@ while (i < 100_000_000) {
 
     TEST10 = """
 a = b = 1
-class {
+A = class {
     nonlocal b
     x = a
-    b = x
-    func() {
+    b = x+1
+    y = func() {
         nonlocal b
         b
     }
 }
+
+io.print(A)
+io.print(A.x==1, b==2)
+io.print(A.y, A.y()==2)
 """[1:-1], False
 
     from os.path import join, dirname, abspath
