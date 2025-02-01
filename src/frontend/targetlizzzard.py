@@ -2,7 +2,9 @@
 from rpython.config.config import OptionDescription, BoolOption, IntOption, ArbitraryOption, FloatOption
 from rpython.config.translationoption import get_combined_translation_config
 from rpython.rlib import jit, objectmodel
-from debugger import debug, done_success
+
+from debugger import debug, done_success, done_exit
+from optimisers import OPTIMISERS
 
 lizzzardoption_descr = OptionDescription(
         "lizzzard", "lizzzard options", [])
@@ -30,14 +32,26 @@ def make_entry_point(lizzzardconfig=None):
             from simple_interpreter import main
         else:
             from interpreter import main
-        main("../code-examples/example.clizz")
-        done_success()
+        exit_code = main("../code-examples/example.clizz")
+        if exit_code == 0:
+            done_success()
+        else:
+            done_exit(exit_code)
         return 0
     return entry_point
 
 exposed_options = []
 
 def target(driver, args):
+    from rpython.jit.metainterp import optimizeopt
+    _old_build_opt_chain = optimizeopt.build_opt_chain
+    def build_opt_chain(enable_opts):
+        opts = _old_build_opt_chain(enable_opts)
+        for Class in OPTIMISERS:
+            opts.append(Class())
+        return opts
+    optimizeopt.build_opt_chain = build_opt_chain
+
     from rpython.config.config import to_optparse
     config = driver.config
     parser = to_optparse(config, useoptions=[])

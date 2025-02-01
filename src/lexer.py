@@ -1,5 +1,6 @@
 from __future__ import annotations
 from enum import Enum, auto
+from io import StringIO
 
 
 DEBUG_THROW:bool = False
@@ -29,6 +30,11 @@ class Token:
 
     def name_as(self, token:str) -> Token:
         return Token(token, self.stamp, self.type)
+
+    @property
+    def size(self) -> int:
+        # TODO: account for str prefix and """?
+        return len(self.token) + self.isstring()
 
     def __eq__(self, other:str|Token) -> bool:
         if isinstance(other, str):
@@ -105,16 +111,21 @@ class FinishedWithError(SyntaxError): ...
 
 
 class PreLexer:
-    __slots__ = "under", "buffer", "ran_out", "line", "char", "line_string"
+    __slots__ = "under", "buffer", "ran_out", "line", "char", "line_string", \
+                "all"
 
     def __init__(self, buffer:TextIOBase) -> PreLexer:
         self.under:TextIOBase = buffer
+        self.all:StringIO = StringIO()
         self.ran_out:bool = False
         self.line_string:str = ""
         self.buffer:str = ""
         self.line:int = 1
         self.char:int = 0
         self.peek(1)
+
+    def get_all_text(self) -> str:
+        return self.all.getvalue()
 
     def __bool__(self) -> bool:
         return (not self.ran_out) or bool(self.buffer)
@@ -135,6 +146,7 @@ class PreLexer:
         if (len(self.buffer) < size) and (not self.ran_out):
             while True:
                 char:str = self.under.read(1)
+                self.all.write(char)
                 self.buffer += char
                 if char == "\n":
                     break
@@ -227,6 +239,9 @@ class Tokeniser:
         self.ran_out:bool = False
         self.read_newline_into_buffer(first=True)
 
+    def get_all_text(self) -> str:
+        return self.under.get_all_text()
+
     def _throw(self, msg:str, stamp:Stamp=None) -> None:
         stamp:Stamp = stamp or self.under.stamp()
         assert isinstance(stamp, Stamp), "TypeError"
@@ -310,7 +325,7 @@ class Tokeniser:
                    [Token("\n", stamp, TokenType.OTHER)]
         elif token in "\t ":
             assert self.under.read(1) == token, "Never fails"
-        elif token.isidentifier() or (token == "⊥"):
+        elif token.isidentifier() or (not token.isascii()):
             ident:Token = self.read_identifier()
             if self.under.peek(1) in ("'", '"'):
                 ret:Token = self.read_string(ident.token, type_stamp=stamp)
@@ -319,7 +334,8 @@ class Tokeniser:
         elif token == "?":
             q_mark:Stamp = self.under.stamp()
             self.under.read(1)
-            if self.under.peek(1).isidentifier():
+            next_token:str = self.under.peek(1)
+            if next_token.isidentifier() or (not next_token.isascii()):
                 ident:Token = self.read_identifier()
                 ret:Token = Token("?"+ident.token, q_mark, TokenType.IDENTIFIER)
             else:
@@ -340,12 +356,16 @@ class Tokeniser:
         elif token in "$:[](){},;":
             self.under.read(1)
             ret:Token = Token(token, stamp, TokenType.OTHER)
-        elif token in "+-*^%|<>=":
+        elif token in "+-*^%|<>=&":
             self.under.read(1)
             if (token == "-") and (self.under.peek(1) == ">"):
                 token += self.under.read(1)
             else:
                 if (token == "*") and (self.under.peek(1) == "*"): # **
+                    token += self.under.read(1)
+                elif (token == ">") and (self.under.peek(1) == ">"): # >>
+                    token += self.under.read(1)
+                elif (token == "<") and (self.under.peek(1) == "<"): # <<
                     token += self.under.read(1)
                 if (token in "-+") and (self.under.peek(1) == token): # ++ --
                     token += self.under.read(1)
@@ -413,7 +433,8 @@ class Tokeniser:
             if not char:
                 break
             ntoken:str = token + char
-            if (not ntoken.isidentifier()) and char.isascii():
+            if (not ntoken.isidentifier()) and char.isascii() and \
+               (not ("0" <= char <= "9")):
                 break
         return Token(token, stamp, TokenType.IDENTIFIER)
 

@@ -59,7 +59,8 @@ if NO_RPYTHON:
 const_str = promote_unicode
 const = promote
 
-USE_JIT = False
 USE_JIT = True
+ENTER_JIT_FUNC_CALL = True
+ENTER_JIT_FUNC_RET = True
 
 # https://readthedocs.org/projects/ppc/downloads/pdf/latest/

@@ -35,6 +35,9 @@ FULL_TESTS = (
                 ("x\n\t#c\ny", "x\ny"),
                 ("...", ["..."]),
                 ("⊥()", ["⊥", "(", ")"]),
+                ("⊥0()", ["⊥0", "(", ")"]),
+                ("·1()", ["·1", "(", ")"]),
+                ("Δ9()", ["Δ9", "(", ")"]),
              )
 
 
@@ -67,7 +70,7 @@ t:Tokeniser = Tokeniser(StringIO(code))
 #       sep="\n")
 for i in range(15):
     tok = t.read()
-    print([tok, t.indentation, bool(t), t.buffer, t.under.peek(999)])
+    print([tok, tok.type, t.indentation, bool(t), t.buffer, t.under.peek(999)])
 
 
 # """

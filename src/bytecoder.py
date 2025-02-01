@@ -49,15 +49,20 @@ class Regs:
         self._notify_max_reg(reg)
         return reg
 
-    def free_reg(self, reg:int, instructions:Block) -> None:
+    def free_reg(self, reg:int) -> None:
+        assert 0 <= reg < len(self._taken), "ValueError"
+        assert self._taken[reg], "reg not taken"
+        self.mark_as_free_reg(reg)
+
+    def mark_as_free_reg(self, reg:int) -> None:
         assert 0 <= reg < len(self._taken), "ValueError"
         if reg > 1:
-            assert self._taken[reg], "reg not taken"
             self._taken[reg] = False
 
     def clear_reg(self, reg:int, instructions:Block) -> None:
         if reg > 1:
-            instructions.append(BLiteral(reg, BNONE, BLiteral.UNDEFINED_T))
+            instructions.append(BLiteral(EMPTY_ERR, reg, BNONE,
+                                         BLiteral.UNDEFINED_T))
 
     def _notify_max_reg(self, max_reg:int) -> None:
         self.max_reg:int = max(self.max_reg, max_reg)
@@ -95,7 +100,7 @@ class State:
         self.regs:Regs = regs
         self.env:Env = env
         if self.master is None:
-            self._attrs:list[str] = [CONSTRUCTOR_NAME]
+            self._attrs:list[str] = SPECIAL_ATTRS.copy()
 
     @property
     def attrs(self) -> list[str]:
@@ -110,10 +115,10 @@ class State:
 
     @property
     def full_env(self) -> Env:
-        return self._add_lists(BUILTIN_HELPERS, self.env,
-                               sorted(list(self.not_env)))
+        return self._add_lists(self.env, sorted(list(self.not_env)))
 
     def _add_lists(self, *arrays:tuple[list[object]]) -> list[object]:
+        # Joins the lists into 1, while removing duplicates
         output:list[object] = []
         seen:set[object] = set()
         for array in arrays:
@@ -159,7 +164,7 @@ class State:
     @staticmethod
     def new(flags:FeatureFlags) -> State:
         block:Block = Block()
-        env:Env = Env(BUILTINS[len(BUILTIN_HELPERS):])
+        env:Env = Env(REAL_BUILTINS)
         uses:dict[str:tuple[Token,bool]] = {n:(None,True) for n in BUILTINS}
         return State(block=block, blocks=[block], nonlocals=Nonlocals(),
                      loop_labels=[], regs=Regs(), env=env, uses=uses,
@@ -194,9 +199,10 @@ class State:
                                   (other.must_end_loop or other.must_ret)
         self.must_ret &= other.must_ret
 
-    def assert_read(self, name_token:Token, reg:int) -> None:
+    def assert_read(self, op:Cmd, name_token:Token, reg:int) -> None:
         assert isinstance(name_token, Token), "TypeError"
         assert isinstance(reg, int), "TypeError"
+        assert isinstance(op, Cmd), "TypeError"
         assert reg > 1, "ValueError"
         if self.must_end_loop or self.must_ret: return
         state:State = self
@@ -205,7 +211,8 @@ class State:
             if name in state.env:
                 if name not in self.uses:
                     self.uses[name] = (name_token, False)
-                self.append_bast(BStoreLoadDict(name, reg, False))
+                self.append_bast(BStoreLoadDict(op_to_err(op), name, reg,
+                                                False))
                 return
             state:State = state.master
         name_token.throw(f"variable {name!r} was not defined")
@@ -249,10 +256,23 @@ class State:
                 used_token.double_throw(msg1, msg2, token)
             self.uses[name] = (token, True)
 
+    def get_class_chain(self) -> int:
+        state:State = self
+        link:int = 0
+        while state.class_state:
+            state:State = state.master
+            link += 1
+        return link
+
     # Reg helpers
     def free_reg(self, reg:int) -> None:
         assert isinstance(reg, int), "TypeError"
-        self.regs.free_reg(reg, self.block)
+        self.regs.free_reg(reg)
+        self.clear_reg(reg)
+
+    def mark_as_free_reg(self, reg:int) -> None:
+        assert isinstance(reg, int), "TypeError"
+        self.regs.mark_as_free_reg(reg)
         self.clear_reg(reg)
 
     def get_free_reg(self) -> int:
@@ -266,7 +286,7 @@ class State:
 
     def get_none_reg(self) -> int:
         reg:int = self.get_free_reg()
-        self.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
+        self.append_bast(BLiteral(EMPTY_ERR, reg, BNONE, BLiteral.NONE_T))
         return reg
 
     @contextmanager
@@ -291,7 +311,8 @@ class State:
             elif isinstance(bt, BDotDict) and self.flags.is_set("ENV_IS_LIST"):
                 self.add_attr(bt.attr)
                 attr_idx:int = self.attrs.index(bt.attr)
-                bt:Bast = BDotList(bt.obj_reg, attr_idx, bt.reg, bt.storing)
+                bt:Bast = BDotList(bt.err, bt.obj_reg, attr_idx, bt.reg,
+                                   bt.storing)
             elif isinstance(bt, BStoreLoadDict):
                 scope, link = self, 0
                 if bt.name in self.nonlocals:
@@ -307,9 +328,9 @@ class State:
                         scope:State = scope.master
                         if scope is None:
                             raise NotImplementedError("Impossible")
-                link -= self.class_state
+                    link += self.class_state
                 idx:int = scope.full_env.index(bt.name)
-                bt:Bast = BStoreLoadList(link, idx, bt.reg, bt.storing)
+                bt:Bast = BStoreLoadList(bt.err, link, idx, bt.reg, bt.storing)
             fransformed_block.append(bt)
         self.block[:] = fransformed_block
 
@@ -321,10 +342,10 @@ class State:
                     self.add_attr(bt.name)
                     if self.flags.is_set("ENV_IS_LIST"):
                         attr_idx:int = self.attrs.index(bt.name)
-                        bt:Bast = BDotList(CLS_REG, attr_idx, bt.reg,
+                        bt:Bast = BDotList(bt.err, CLS_REG, attr_idx, bt.reg,
                                            bt.storing)
                     else:
-                        bt:Bast = BDotDict(CLS_REG, bt.name, bt.reg,
+                        bt:Bast = BDotDict(bt.err, CLS_REG, bt.name, bt.reg,
                                            bt.storing)
             fransformed_block.append(bt)
         self.block[:] = fransformed_block
@@ -368,10 +389,11 @@ RegsSize = EnvSize = int
 
 
 class ByteCoder:
-    __slots__ = "ast", "_labels", "_flags", "_states", "_todo"
+    __slots__ = "ast", "source_code", "_labels", "_flags", "_states", "_todo"
 
-    def __init__(self, ast:Body, flags:FeatureFlags) -> ByteCoder:
+    def __init__(self, ast:Body, source_code:str, flags:FeatureFlags):
         self._todo:list[Callable[None]] = []
+        self.source_code:str = source_code
         self._flags:FeatureFlags = flags
         self._labels:Labels = Labels()
         self._states:list[State] = []
@@ -385,37 +407,39 @@ class ByteCoder:
             reg:int = self._convert(cmd, main_state)
             main_state.free_reg(reg)
         with main_state.get_free_reg_wrapper() as tmp_reg:
-            main_state.append_bast(BLiteral(tmp_reg, BLiteralInt(0),
+            main_state.append_bast(BLiteral(EMPTY_ERR, tmp_reg, BLiteralInt(0),
                                             BLiteral.INT_T))
-            main_state.append_bast(BRet(tmp_reg, False))
+            main_state.append_bast(BRet(EMPTY_ERR, tmp_reg))
         main_state.fransform_func()
         while self._todo:
             self._todo.pop(0)()
         for state in self._states:
             state.fransform_block()
         return main_state.regs.max_reg+1, len(main_state.full_env), \
-               main_state.attrs, main_state.blocks
+               main_state.attrs, main_state.blocks, self.source_code
 
-    def to_bytecode(self) -> tuple[RegsSize,EnvSize,list[str],list[Block]]:
+    def to_bytecode(self) -> tuple[RegsSize,EnvSize,list[str],list[Block],str]:
         try:
             return self._to_bytecode()
         except (SemanticError, FinishedWithError) as error:
             if DEBUG_RAISE and isinstance(error, FinishedWithError):
                 print(traceback.format_exc(), end="")
             print(f"\x1b[91mSemanticError: {error.msg}\x1b[0m", file=stderr)
-            return 3, 0, [], []
+            return 3, 0, [], [], ""
 
     def _serialise(self, frame_size:int, env_size:int, attrs:list[str],
-                   bytecode:Block) -> bytes:
+                   bytecode:Block, source_code:str) -> bytes:
         bast:bytearray = bytearray()
         for instruction in bytecode:
             bast += instruction.serialise()
-        return serialise(self._flags, frame_size, env_size, attrs, bytes(bast))
+        return serialise(self._flags, frame_size, env_size, attrs, bytes(bast),
+                         source_code)
 
     def serialise(self) -> bytes:
-        frame_size, env_size, attrs, bytecode_blocks = self.to_bytecode()
-        bytecode:Block = reduce(iconcat, bytecode_blocks, [])
-        return self._serialise(frame_size, env_size, attrs, bytecode)
+        frame_size, env_size, attrs, blocks, source_code = self.to_bytecode()
+        bytecode:Block = reduce(iconcat, blocks, [])
+        return self._serialise(frame_size, env_size, attrs, bytecode,
+                               source_code)
 
     def _convert_body(self, body:Body, state:State) -> None:
         for cmd in body:
@@ -432,12 +456,15 @@ class ByteCoder:
             for target in cmd.targets:
                 if isinstance(target, Var):
                     name:str = target.identifier.token
+                    if name == CONSTRUCTOR_NAME:
+                        break
             reg:int = self._convert(cmd.value, state, name=name)
             for target in cmd.targets:
                 if isinstance(target, Var):
                     token:Token = target.identifier
                     state.write_env(token)
-                    state.append_bast(BStoreLoadDict(token.token, reg, True))
+                    state.append_bast(BStoreLoadDict(op_to_err(target),
+                                                     token.token, reg, True))
                 elif isinstance(target, Op):
                     # res_reg:int = state.get_free_reg()
                     if target.op == "simple_idx":
@@ -445,17 +472,21 @@ class ByteCoder:
                         for exp in target.args:
                             args.append(self._convert(exp, state))
                         with state.get_free_reg_wrapper() as tmp_reg:
-                            state.append_bast(BStoreLoadDict("simple_idx=",
+                            state.append_bast(BStoreLoadDict(op_to_err(target),
+                                                             "simple_idx=",
                                                              tmp_reg, False))
-                            state.append_bast(BCall([0,tmp_reg] + args + [reg]))
-                        for reg in args:
-                            state.free_reg(reg)
+                            state.append_bast(BCall(op_to_err(cmd),
+                                                    [0,tmp_reg]+args+[reg],
+                                                    clear=args))
+                        for _reg in args:
+                            state.mark_as_free_reg(_reg)
                     elif target.op == ".":
                         if not isinstance(target.args[1], Var):
                             raise NotImplementedError("Impossible")
                         attr:str = target.args[1].identifier.token
                         obj_reg:int = self._convert(target.args[0], state)
-                        state.append_bast(BDotDict(obj_reg, attr, reg, True))
+                        state.append_bast(BDotDict(op_to_err(target), obj_reg,
+                                                   attr, reg, True))
                         state.free_reg(obj_reg)
                     elif target.op == "·,·":
                         raise NotImplementedError("TODO")
@@ -473,24 +504,29 @@ class ByteCoder:
                     res_reg:int = literal
                 else:
                     res_reg:int = state.get_free_reg()
-                    state.append_bast(BLiteral(res_reg, BLiteralInt(literal),
+                    state.append_bast(BLiteral(op_to_err(cmd), res_reg,
+                                               BLiteralInt(literal),
                                                BLiteral.INT_T))
             elif value.isstring():
                 res_reg:int = state.get_free_reg()
-                state.append_bast(BLiteral(res_reg, BLiteralStr(value.token),
+                val:BLiteralStr = BLiteralStr(value.token[1:])
+                state.append_bast(BLiteral(op_to_err(cmd), res_reg, val,
                                            BLiteral.STR_T))
             elif value in ("true", "false"):
                 res_reg:int = int(value == "true")
             elif value == "none":
                 res_reg:int = state.get_none_reg()
             elif value.isfloat():
-                raise NotImplementedError("TODO")
+                res_reg:int = state.get_free_reg()
+                val:BLiteralFloat = BLiteralFloat(float(value.token))
+                state.append_bast(BLiteral(op_to_err(cmd), res_reg, val,
+                                           BLiteral.FLOAT_T))
             else:
                 raise NotImplementedError("Impossible")
 
         elif isinstance(cmd, Var):
             res_reg:int = state.get_free_reg()
-            state.assert_read(cmd.identifier, res_reg)
+            state.assert_read(cmd, cmd.identifier, res_reg)
 
         elif isinstance(cmd, Op):
             if cmd.op == "if":
@@ -500,17 +536,18 @@ class ByteCoder:
                 label_end:Bable = Bable("if_end_"+str(if_id))
                 # Condition
                 reg:int = self._convert(cmd.args[0], state)
-                state.append_bast(BJump(label_true.id, reg, False))
-                state.free_reg(reg)
+                state.append_bast(BJump(op_to_err(cmd), label_true.id, reg,
+                                        False))
                 res_reg:int = state.get_free_reg()
+                state.mark_as_free_reg(reg)
                 # If-false
                 tmp_reg:int = self._convert(cmd.args[2], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
                 state.free_reg(tmp_reg)
-                state.append_bast(BJump(label_end.id, 1, False))
+                state.append_bast(BJump(EMPTY_ERR, label_end.id, 1, False))
                 # If-true
                 state.append_bast(label_true)
-                state.clear_reg(reg)
+                state.mark_as_free_reg(reg)
                 tmp_reg:int = self._convert(cmd.args[1], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
                 state.free_reg(tmp_reg)
@@ -521,7 +558,8 @@ class ByteCoder:
                 res_reg:int = state.get_free_reg()
                 attr:str = cmd.args[1].identifier.token
                 obj_reg:int = self._convert(cmd.args[0], state)
-                state.append_bast(BDotDict(obj_reg, attr, res_reg, False))
+                state.append_bast(BDotDict(op_to_err(cmd), obj_reg, attr,
+                                           res_reg, False))
                 state.free_reg(obj_reg)
             elif cmd.op in ("and", "or"):
                 # Set up
@@ -532,8 +570,9 @@ class ByteCoder:
                 # Arg 1
                 tmp_reg:int = self._convert(cmd.args[0], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
-                state.append_bast(BJump(label_or.id, tmp_reg, negate_if))
-                state.free_reg(tmp_reg)
+                state.append_bast(BJump(op_to_err(cmd), label_or.id, tmp_reg,
+                                        negate_if))
+                state.mark_as_free_reg(tmp_reg)
                 # Arg 2
                 tmp_reg:int = self._convert(cmd.args[1], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
@@ -542,17 +581,24 @@ class ByteCoder:
                 state.append_bast(label_or)
             else:
                 res_reg:int = state.get_free_reg()
-                used_regs:list[int] = []
-                if cmd.op != "call":
+                used_regs:list[int] = [0]
+                if cmd.op == "call":
+                    for arg in cmd.args[1:]:
+                        reg:int = self._convert(arg, state)
+                        used_regs.append(reg)
+                    reg:int = self._convert(cmd.args[0], state)
+                    used_regs[0] = reg
+                else:
+                    for arg in cmd.args:
+                        reg:int = self._convert(arg, state)
+                        used_regs.append(reg)
                     func:int = state.get_free_reg()
-                    state.assert_read(cmd.op, func)
-                    used_regs.append(func)
-                for arg in cmd.args:
-                    reg:int = self._convert(arg, state)
-                    used_regs.append(reg)
-                state.append_bast(BCall([res_reg] + used_regs))
+                    state.assert_read(Var(cmd.op), cmd.op, func)
+                    used_regs[0] = func
+                state.append_bast(BCall(op_to_err(cmd), [res_reg]+used_regs,
+                                        clear=used_regs))
                 for reg in used_regs:
-                    state.free_reg(reg)
+                    state.mark_as_free_reg(reg)
 
         elif isinstance(cmd, If):
             #   reg := condition
@@ -566,15 +612,15 @@ class ByteCoder:
             label_true:Bable = Bable("if_true_"+str(if_id))
             label_end:Bable = Bable("if_end_"+str(if_id))
             reg:int = self._convert(cmd.exp, state)
-            state.append_bast(BJump(label_true.id, reg, False))
-            state.free_reg(reg)
+            state.append_bast(BJump(op_to_err(cmd), label_true.id, reg, False))
+            state.mark_as_free_reg(reg)
             other_state:State = state.copy_for_branch()
             for subcmd in cmd.false:
                 tmp_reg:int = self._convert(subcmd, state)
                 state.free_reg(tmp_reg)
-            state.append_bast(BJump(label_end.id, 1, False))
+            state.append_bast(BJump(op_to_err(cmd), label_end.id, 1, False))
             state.append_bast(label_true)
-            state.clear_reg(reg)
+            state.mark_as_free_reg(reg)
             for subcmd in cmd.true:
                 tmp_reg:int = self._convert(subcmd, other_state)
                 other_state.free_reg(tmp_reg)
@@ -594,50 +640,63 @@ class ByteCoder:
             label_end:Bable = Bable(f"while_{while_id}_end")
             state.append_bast(label_start)
             reg:int = self._convert(cmd.exp, state)
-            state.append_bast(BJump(label_end.id, reg, True))
-            state.free_reg(reg)
+            state.append_bast(BJump(op_to_err(cmd), label_end.id, reg, True))
+            state.mark_as_free_reg(reg)
             state.loop_labels.append((label_start.id, label_end.id))
             other_state:State = state.copy_for_branch()
             for subcmd in cmd.true:
                 tmp_reg:int = self._convert(subcmd, other_state)
                 other_state.free_reg(tmp_reg)
             state.loop_labels.pop()
-            state.append_bast(BJump(label_start.id, 1, False))
+            state.append_bast(BJump(EMPTY_ERR, label_start.id, 1, False))
             state.append_bast(label_end)
-            state.clear_reg(reg)
+            state.mark_as_free_reg(reg)
             state.merge_branch(cmd, other_state)
 
         elif isinstance(cmd, Func):
             func_id:int = self._labels.get_fl()
+            label:str = f"func_{name.lower()}_{func_id}"
             # <INSTRUCTIONS>:
             #   res_reg := func_label
             res_reg:int = state.get_free_reg()
-            func_literal:BLiteralFunc = BLiteralFunc(0, func_id, len(cmd.args),
-                                                     name)
-            state.append_bast(BLiteral(res_reg, func_literal, BLiteral.FUNC_T))
+            link:int = state.get_class_chain()
+            func_literal:BLiteralFunc = BLiteralFunc(0, label, len(cmd.args),
+                                                     name, link)
+            link:int = state.get_class_chain()
+            state.append_bast(BLiteral(op_to_err(cmd), res_reg, func_literal,
+                                       BLiteral.FUNC_T))
+            is_constructor:bool = state.class_state and \
+                                  (name == CONSTRUCTOR_NAME)
             def todo() -> None:
                 # <NEW BODY>:
                 # label_start:
                 #   <copy args>
                 #   <function-body>
-                label_start:Bable = Bable(f"{func_id}")
+                label_start:Bable = Bable(label)
                 nstate:State = state.copy_for_func()
                 self._states.append(nstate)
                 nstate.append_bast(label_start)
                 for i, arg in enumerate(cmd.args, start=2):
                     token:Token = arg.identifier
                     nstate.write_env(token)
-                    nstate.append_bast(BStoreLoadDict(token.token, i, True))
+                    nstate.append_bast(BStoreLoadDict(EMPTY_ERR,
+                                                      token.token, i, True))
                 for i, subcmd in enumerate(cmd.body):
                     tmp_reg:int = self._convert(subcmd, nstate)
-                    # If last cmd is an Expr, return it
                     if (i == len(cmd.body)-1) and isinstance(subcmd, Expr):
-                        nstate.append_bast(BRet(tmp_reg, False))
+                        # If last cmd is an Expr and not constructor, return it
+                        if not is_constructor:
+                            nstate.append_bast(BRet(EMPTY_ERR, tmp_reg))
                     nstate.free_reg(tmp_reg)
-                if not nstate.must_ret:
-                    reg:int = nstate.get_free_reg()
-                    nstate.append_bast(BLiteral(reg, BNONE, BLiteral.NONE_T))
-                    nstate.append_bast(BRet(reg, False))
+                if not nstate.must_ret: # return `none` or `self`
+                    if is_constructor:
+                        reg:int = nstate.get_free_reg()
+                        arg_name:str = cmd.args[0].identifier.token
+                        nstate.append_bast(BStoreLoadDict(EMPTY_ERR,
+                                                          arg_name, reg, False))
+                    else:
+                        reg:int = nstate.get_none_reg()
+                    nstate.append_bast(BRet(EMPTY_ERR, reg))
                 nstate.fransform_func()
                 func_literal.env_size = len(nstate.full_env)
             # Convert the Func to bytecode after the rest of the code in the
@@ -659,7 +718,7 @@ class ByteCoder:
                     state.assert_can_nonlocal(identifier_token)
                     state.nonlocals[identifier] = 1
                 link:int = state.nonlocals[identifier]
-                state.append_bast(BLoadLink(identifier, link))
+                state.append_bast(BLoadLink(op_to_err(cmd), identifier, link))
 
         elif isinstance(cmd, ReturnYield):
             if cmd.isreturn:
@@ -673,7 +732,7 @@ class ByteCoder:
                     reg:int = state.get_none_reg()
                 else:
                     reg:int = self._convert(cmd.exp, state)
-                state.append_bast(BRet(reg, False))
+                state.append_bast(BRet(op_to_err(cmd), reg))
                 state.free_reg(reg)
                 state.must_ret:bool = True # Must be at the end
             else:
@@ -692,17 +751,27 @@ class ByteCoder:
                 cmd.ft.throw(msg)
             start_label, end_label = state.loop_labels[-cmd.n]
             label:str = end_label if cmd.isbreak else start_label
-            state.append_bast(BJump(label, 1, False))
+            state.append_bast(BJump(EMPTY_ERR, label, 1, False))
             state.must_end_loop:bool = True # Must be at the end
 
         elif isinstance(cmd, Class):
             res_reg:int = state.get_free_reg()
-            label:str = f"class_{self._labels.get_fl()}"
+            cls_init:int = state.get_free_reg()
+            cls_label_id:int = self._labels.get_fl()
+            label:str = f"cls_{name.lower()}_{cls_label_id}"
             bases:list[Reg] = []
             for base in cmd.bases:
                 bases.append(self._convert(base, state))
-            cls_literal:BLiteralClass = BLiteralClass(bases, label, name)
-            state.append_bast(BLiteral(res_reg, cls_literal, BLiteral.CLASS_T))
+            link:int = state.get_class_chain()
+            cls_literal:BLiteralClass = BLiteralClass(bases, name)
+            cls_init_lit:BLiteralFunc = BLiteralFunc(0, label, 1, label, link)
+            state.append_bast(BLiteral(op_to_err(cmd), res_reg, cls_literal,
+                                       BLiteral.CLASS_T))
+            state.append_bast(BLiteral(op_to_err(cmd), cls_init, cls_init_lit,
+                                       BLiteral.FUNC_T))
+            state.append_bast(BCall(op_to_err(cmd), [0,cls_init,res_reg],
+                                    clear=[cls_init]))
+            state.mark_as_free_reg(cls_init)
             for base in bases:
                 state.free_reg(base)
             def todo() -> None:
@@ -710,10 +779,10 @@ class ByteCoder:
                 nstate.append_bast(Bable(label))
                 cls_obj_reg:int = nstate.get_free_reg()
                 assert cls_obj_reg == CLS_REG, "InternalError"
-                for assignment in cmd.insides:
+                for assignment in cmd.body:
                     self._convert(assignment, nstate)
                 nstate.free_reg(cls_obj_reg)
-                nstate.append_bast(BRet(0, True))
+                nstate.append_bast(BRet(op_to_err(cmd), 0))
                 nstate.fransform_class()
             # self._todo.append(todo)
             todo()
@@ -729,9 +798,21 @@ class ByteCoder:
             file.write(self.serialise())
 
 
+def token_to_idx_pair(token:Token, *, last:bool) -> tuple[int,int]:
+    return (token.stamp.line,
+            token.stamp.char + token.size*last)
+
+def op_to_err(op:Cmd) -> ErrorIdx:
+    err = ErrorIdx(token_to_idx_pair(get_first_token(op), last=False),
+                    token_to_idx_pair(get_last_token(op), last=True))
+    return err
+
+
 if __name__ == "__main__":
     TEST1 = r"""
-print("####### General stuff ########")
+io.print("####### General stuff ########")
+io.print(2, "\t", 0.1+0.2==0.3, 0.3==0.1+0.2)
+
 f = func(x){func(){x}}
 c = func(f){
     x = y = g = 0
@@ -739,7 +820,7 @@ c = func(f){
 }
 x = 5
 y = 2
-print(1, "\t", 7==c(f(x+y)))
+io.print(1, "\t", 7==c(f(x+y)))
 
 
 f = func(x, y){
@@ -756,17 +837,17 @@ while (z > 0){
         break
     }
 }
-print(1, "\t", 5==z)
+io.print(1, "\t", 5==z)
 
 
 x = [5, 10, 15]
-print(1, "\t", 10==x[1])
+io.print(1, "\t", 10==x[1])
 x[1] = 15
-append(x, 20)
-print(2, "\t", 15==x[1], 20==x[3])
+x.append(20)
+io.print(2, "\t", 15==x[1], 20==x[3])
 
 
-print("########## Closures ##########")
+io.print("########## Closures ##########")
 x = 21
 tmp = func(){
     nonlocal x
@@ -784,7 +865,7 @@ add = tmp[0]
 get = tmp[1]
 add()
 add()
-print(2, "\t", 25==x, get()+5==30)
+io.print(2, "\t", 25==x, get()+5==30)
 
 
 # Similar to the one above
@@ -792,11 +873,11 @@ f = func(x){[func(){x}, func(){nonlocal x;x+=1}]}
 tmp = f(1)
 get = tmp[0]
 add = tmp[1]
-print(2, "\t", get()*15==15, get()*20==20)
+io.print(2, "\t", get()*15==15, get()*20==20)
 add()
-print(1, "\t", get()*12+1==25)
+io.print(1, "\t", get()*12+1==25)
 add()
-print(1, "\t", get()*10==30)
+io.print(1, "\t", get()*10==30)
 
 
 Y = func(f){
@@ -808,10 +889,10 @@ fact_helper = func(rec){
     }
 }
 fact = Y(fact_helper)
-print(1, "\t", 120==fact(5))
+io.print(1, "\t", 120==fact(5))
 
 
-print("########### Lists ############")
+io.print("########### Lists ############")
 x = [1, 2, 3, 4, 5]
 a = x[:2]
 b = x[2:]
@@ -819,9 +900,10 @@ c = x[1:2]
 d = x[-2:]
 e = x[-2:-1]
 f = x[::-1]
-print(18, "\t", len(a)==2, a[0]==1, a[1]==2, len(b)==3, b[0]==3, b[1]==4,
-      b[2]==5, len(c)==1, c[0]==2, len(d)==2, d[0]==4, d[1]==5, len(e)==1,
-      e[0]==4, len(f)==5, f[0]==5, f[-1]==1, f[1]==4)
+io.print(5, "\t", a.len()==2, a[0]==1, a[1]==2, b.len()==3, b[0]==3)
+io.print(5, "\t", b[1]==4, b[2]==5, c.len()==1, c[0]==2, d.len()==2)
+io.print(5, "\t", d[0]==4, d[1]==5, e.len()==1, e[0]==4, f.len()==5)
+io.print(3, "\t", f[0]==5, f[-1]==1, f[1]==4)
 
 
 add = /? + ?/
@@ -840,20 +922,21 @@ iseven = func(x) {
     return isodd(x-1)
 }
 
-print("####### Partial funcs ########")
-print(3, "\t", 200==add(120,80), 200==add120(80), 200==add80(60))
-print("###### Mutual recursion ######")
-print(6, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
-      isodd(1), iseven(0))
+io.print("####### Partial funcs ########")
+io.print(3, "\t", 200==add(120,80), 200==add120(80), 200==add80(60))
+io.print("###### Mutual recursion ######")
+io.print(5, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
+         isodd(1))
+io.print(1, "\t", iseven(0))
 
 
-print("#### And/Or short-circuit ####")
+io.print("#### And/Or short-circuit ####")
 ⊥ = func(){⊥()}
-print(5, "\t", (5 or ⊥())==5, (0 or 1)==1, (1 and 2)==2, (0 and ⊥())==0,
-               (1 and 0)==0)
+io.print(5, "\t", (5 or ⊥())==5, (0 or 1)==1, (1 and 2)==2, (0 and ⊥())==0,
+                  (1 and 0)==0)
 
 
-print("######## Object model ########")
+io.print("######## Object model ########")
 unbounded_funcs = []
 bounded_funcs = []
 classes = []
@@ -866,24 +949,29 @@ A = class {
     f = func(self) {
         nonlocal t
         if (self != 7) {
-            append(objects, self)
+            objects.append(self)
         } else {
-            append(classes, A)
+            classes.append(A)
         }
-        print(1, "\t", A.X==6)
+        io.print(1, "\t", A.X==6)
         t = A.X + 2
         A.X = 0
     }
     t = X
     if X {a=1}
+    Y = class {
+        Z = class {
+            Δ = 13
+        }
+    }
 }
-print(2, "\t", t==5, A.a==1)
+io.print(2, "\t", t==5, A.a==1)
 A.X = 6
 A.f(7)
-print(2, "\t", t==8, A.X==0)
+io.print(3, "\t", t==8, A.X==0, A.Y.Z.Δ==13)
 
 a = A()
-append(objects, a)
+objects.append(a)
 A.X = 6
 a.f()
 
@@ -894,19 +982,28 @@ B = class(A) {
     Y = 0
     f = func() {}
 }
-append(unbounded_funcs, B.f)
-append(bounded_funcs, B().f)
+unbounded_funcs.append(B.f)
+bounded_funcs.append(B().f)
 
-print(3, "\t", A.X==0, B.X==0, B.Y==0)
+io.print(3, "\t", A.X==0, B.X==0, B.Y==0)
 B.X = 1
-print(3, "\t", A.X==0, B.X==1, B.Y==0)
+io.print(3, "\t", A.X==0, B.X==1, B.Y==0)
 A.X = 2
-print(3, "\t", A.X==2, B.X==1, B.Y==0)
+io.print(3, "\t", A.X==2, B.X==1, B.Y==0)
 
-print("These should be classes:\t\t", classes)
-print("These should be instances:\t\t", objects)
-print("These should be unbounded functions:\t", unbounded_funcs)
-print("These should be bounded functions:\t", bounded_funcs)
+
+io.print("######## Is instance #########")
+A = class {}
+a = A()
+io.print(5, "\t", isinstance(a, A), not isinstance(a, int),
+                  isinstance(1, float), not isinstance(1, A),
+                  isinstance("a", str))
+
+
+io.print("These should be classes:\t\t", classes)
+io.print("These should be instances:\t\t", objects)
+io.print("These should be unbounded functions:\t", unbounded_funcs)
+io.print("These should be bounded functions:\t", bounded_funcs)
 """[1:-1], False
 
     TEST2 = """
@@ -914,9 +1011,9 @@ fib = func(x) ->
     if x < 1 ->
         return 1
     return fib(x-2) + fib(x-1)
-print(fib(15), "should be", 1597)
-print(fib(30), "should be", 2178309)
-print("cpython takes 0.221 sec")
+io.print(fib(15), "should be", 1597)
+io.print(fib(30), "should be", 2178309)
+io.print("cpython takes 0.221 sec")
 """[1:-1], True
 
     TEST3 = """
@@ -933,31 +1030,31 @@ while (i < max){
             continue 2
         }
     }
-    append(primes, i)
+    primes.append(i)
 }
-print("the number of primes bellow", max, "is:", len(primes),
-      "which should be", 1229)
-print("the last prime is:", primes[-1], "which should be", 9973)
-print("cpython takes 0.373 sec")
+io.print("the number of primes bellow", max, "is:", primes.len(),
+         "which should be", 1229)
+io.print("the last prime is:", primes[-1], "which should be", 9973)
+io.print("cpython takes 0.373 sec")
 """[1:-1], False
 
     TEST4 = """
 i = 0
 while i < 10_000_000 ->
     i += 1
-print("while++", i)
-print("cpython takes 0.233 sec")
+io.print("while++", i)
+io.print("cpython takes 0.233 sec")
 """[1:-1], True
 
     TEST5 = """
-f = func(x){
-    if (x){
+f = func(x) {
+    if (x) {
         return f(x-1) + 1
     }
     return x
 }
-print("rec++", f(1_000_000))
-print("cpython takes 0.201 sec")
+io.print("rec++", f(1_000_000))
+io.print("cpython takes 0.201 sec")
 """[1:-1], False
 
     TEST6 = """
@@ -965,20 +1062,97 @@ A = class {
     A = B = 0
 }
 A.X = 1
-
 while (A.X < 10_000_000) {
     A.X += 1
 }
-
-print("attr++", A.X)
-print("cpython takes 1.476 sec")
+io.print("attr++", A.X)
+io.print("cpython takes 1.120 sec")
 """[1:-1], False
 
+    TEST7 = """
+f = func(x) {
+    if (x) {
+        return f(x-1) + 1
+    }
+    return x + ""
+}
+
+f(2)
+"""[1:-1], False
+
+    TEST9 = """
+assert = func(boolean, msg) {
+    if (not boolean) {
+        io.print(msg)
+        io.print(1/0)
+    }
+}
+
+A = class {
+    __init__ = func(this, x) {
+        assert(isinstance(x, int), "TypeError")
+        this.x = x
+    }
+
+    add = func(this, other) {
+        assert(isinstance(other, A), "TypeError")
+        return A((this.x + other.x) % 100)
+    }
+}
+
+a = A(1)
+
+i = 0
+while (i < 5_000) {
+    i += 1
+    if (i % 2) {
+        a = A(i) # a.add(a)
+    }
+}
+"""[1:-1], False
+
+    TEST9 = """
+A = class {}
+f = func() { a = A() }
+
+i = 0
+while (i < 100_000_000) {
+    i += 1
+    if (i&1 == 0) { ... }
+    f()
+}
+"""[1:-1], False
+
+    TEST10 = """
+a = b = 1
+A = class {
+    nonlocal b
+    x = a
+    b = x+1
+    y = func() {
+        nonlocal b
+        b
+    }
+}
+
+io.print(A)
+io.print(A.x==1, b==2)
+io.print(A.y, A.y()==2)
+"""[1:-1], False
+
+    from os.path import join, dirname, abspath
+    filepath:str = join(dirname(abspath(__file__)), "code-examples",
+                        "raytracer.lizz")
+    with open(filepath, "r") as file:
+        TEST8 = (file.read(), False)
+
     # DEBUG_RAISE:bool = True
-    # 1:all, 2:fib, 3:primes, 4:while++, 5:rec++, 6:attr++
+    # 1:all, 2:fib, 3:primes, 4:while++, 5:rec++, 6:attr++, 7:err, 8:raytracer
+    # 9:problem
     TEST = TEST1
     assert not isinstance(TEST, str), "TEST should be tuple[str,bool]"
-    ast:Body = Parser(Tokeniser(StringIO(TEST[0])), colon=TEST[1]).read()
+    parser:Parser = Parser(Tokeniser(StringIO(TEST[0])), colon=TEST[1])
+    ast:Body = parser.read()
     if ast is None:
         print("\x1b[96mNo ast due to previous error\x1b[0m")
     else:
@@ -986,18 +1160,23 @@ print("cpython takes 1.476 sec")
         flags.set("ENV_IS_LIST")
         flags.set("CLEAR_AFTER_USE")
 
-        bytecoder:ByteCoder = ByteCoder(ast, flags)
-        frame_size, env_size, attrs, bytecode_blocks = bytecoder.to_bytecode()
+        bytecoder:ByteCoder = ByteCoder(ast, parser.get_all_text(), flags)
+        (frame_size, env_size, attrs,
+         bytecode_blocks, code) = bytecoder.to_bytecode()
         bytecode:Block = reduce(iconcat, bytecode_blocks, [])
         if bytecode:
-            print(bytecode_list_to_str(bytecode))
+            if len(bytecode) > 500:
+                print(f"<{len(bytecode)} bytecode instructions>")
+            else:
+                print(bytecode_list_to_str(bytecode))
 
             raw_bytecode:bytes = bytecoder.serialise()
             with open("code-examples/example.clizz", "wb") as file:
                 file.write(raw_bytecode)
 
             data = derialise(raw_bytecode)
-            dec_flags, dec_frame_size, dec_env_size, dec_attrs, dec_bast = data
+            (dec_flags, dec_frame_size,
+             dec_env_size, dec_attrs, dec_bast, dec_code) = data
             print(f"{frame_size=}, {flags=}")
             assert bytecode_list_to_str(bytecode) == \
                    bytecode_list_to_str(dec_bast), "AssertionError"
@@ -1006,6 +1185,7 @@ print("cpython takes 1.476 sec")
             if flags.is_set("ENV_IS_LIST"):
                 assert env_size == dec_env_size, "AssertionError"
                 assert attrs == dec_attrs, "AssertionError"
+            assert dec_code == code
 
     # from time import perf_counter
     # fib = lambda x: 1 if x < 1 else fib(x-2)+fib(x-1)
