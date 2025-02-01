@@ -1,4 +1,6 @@
-import sys
+import signal
+import math
+import os
 
 from python3.rpython_compat import *
 from python3.dict_compat import *
@@ -9,71 +11,94 @@ from bcast import *
 from debugger import debug, DEBUG_LEVEL
 
 
+# Value classes
 class Value:
     _immutable_fields_ = []
     __slots__ = ()
 
-    def __repr__(self):
-        return u"Value[???]"
-
-
 class IntValue(Value):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
-
+    @look_inside
     def __init__(self, value):
         assert isinstance(value, int), "TypeError"
         self.value = value
 
-    def __repr__(self):
-        return u"IntValue[" + int_to_str(self.value) + u"]"
-
-BoolValue = IntValue
-
+BoolValue = IntValue # TODO: implement BoolValue
 
 class StrValue(Value):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
-
+    @look_inside
     def __init__(self, value):
         assert isinstance(value, str), "TypeError"
         self.value = value
 
-    def __repr__(self):
-        return u"StrValue[" + self.value + u"]"
-
+class FloatValue(Value):
+    _immutable_fields_ = ["value"]
+    __slots__ = "value"
+    @look_inside
+    def __init__(self, value):
+        assert isinstance(value, float), "TypeError"
+        self.value = value
 
 class FuncValue(Value):
-    _immutable_fields_ = ["tp", "master"]
-    __slots__ = "tp", "master"
-
-    def __init__(self, tp, master):
-        assert isinstance(master, Dict), "TypeError"
+    _immutable_fields_ = ["tp", "masters", "env_size", "nargs", "name", "bound_obj"]
+    __slots__ = "tp", "masters", "env_size", "nargs", "name", "bound_obj"
+    @unroll_safe
+    @look_inside
+    def __init__(self, tp, masters, env_size, nargs, name, bound_obj):
+        if bound_obj is not None:
+            assert isinstance(bound_obj, Value), "TypeError"
+        assert isinstance(masters, list), "TypeError"
+        for master in masters:
+            assert isinstance(master, ENV_TYPE), "TypeError"
+        assert isinstance(env_size, int), "TypeError"
+        assert isinstance(nargs, int), "TypeError"
+        assert isinstance(name, str), "TypeError"
         assert isinstance(tp, int), "TypeError"
-        self.master = master
+        self.bound_obj = bound_obj
+        self.env_size = env_size
+        self.masters = masters
+        self.nargs = nargs
+        self.name = name
         self.tp = tp
 
-    def __repr__(self):
-        return u"FuncValue[tp=" + int_to_str(self.tp) + u"]"
+class SpecialValue(Value):
+    _immutable_fields_ = ["type", "str_value", "int_value"]
+    __slots__ = "type", "str_value", "int_value"
+    @look_inside
+    def __init__(self, type, str_value=u"", int_value=0):
+        assert isinstance(str_value, str), "TypeError"
+        assert isinstance(int_value, int), "TypeError"
+        assert isinstance(type, str), "TypeError"
+        self.str_value = str_value
+        self.int_value = int_value
+        self.type = type
 
+class NoneValue(Value):
+    _immutable_fields_ = []
+    __slots__ = ()
+    @look_inside
+    def __init__(self): pass
 
-class LinkValue(Value):
-    _immutable_fields_ = ["link"]
-    __slots__ = "link"
-
-    def __init__(self, link):
-        assert isinstance(link, int), "TypeError"
-        assert link > 0, "ValueError"
-        self.link = link
-
-    def __repr__(self):
-        return u"link[" + int_to_str(self.link) + "]"
+class ObjectValue(Value):
+    _immutable_fields_ = ["attr_vals", "type", "name"]
+    __slots__ = "attr_vals", "type", "name"
+    @look_inside
+    def __init__(self, type, name):
+        assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
+        assert isinstance(name, str), "TypeError"
+        self.attr_vals = [None]*len(SPECIAL_ATTRS)
+        self.type = type
+        self.name = name
 
 
 class ListValue(Value):
     _immutable_fields_ = ["array"]
     __slots__ = "array"
 
+    @look_inside
     def __init__(self):
         self.array = []
 
@@ -90,11 +115,11 @@ class ListValue(Value):
 
     @look_inside
     def index_set(self, idx, value):
+        assert isinstance(value, Value), "TypeError"
         assert isinstance(idx, int), "TypeError"
         self.array[idx] = value
 
     @look_inside
-    @elidable
     def len(self):
         return len(self.array)
 
@@ -102,241 +127,718 @@ class ListValue(Value):
         return u"array[size=" + int_to_str(self.len()) + u"]"
 
 
-class NoneValue(Value):
-    __slots__ = ()
-    _immutable_fields_ = []
-
-    def __repr__(self):
-        return u"none"
-
-
+epsilon = 6e-8
 NONE = const(NoneValue())
 ZERO = const(IntValue(0))
 ONE = const(IntValue(1))
 FALSE = const(BoolValue(0))
 TRUE = const(BoolValue(1))
+PI = const(FloatValue(math.pi))
+EPSILON = const(FloatValue(epsilon))
 
 
+# General helpers
 @look_inside
 @elidable
 def get_type(value):
+    if value is None:
+        return u"undefined" # This should never be used
+    if value is NONE:
+        return u"none"
     if isinstance(value, IntValue):
         return u"int"
     if isinstance(value, StrValue):
         return u"str"
-    if isinstance(value, LinkValue):
-        return u"link"
     if isinstance(value, ListValue):
         return u"list"
     if isinstance(value, FuncValue):
         return u"func"
-    if value == NONE:
-        return u"none"
+    if isinstance(value, ObjectValue):
+        return u"class"
+    if isinstance(value, FloatValue):
+        return u"float"
+    if isinstance(value, SpecialValue):
+        if value.type == u"module":
+            return u"module"
+        elif value.type == u"file":
+            return u"file"
+        else:
+            return u"unknown-special-type"
     return u"unknown"
 
 @look_inside
-@elidable
 def force_bool(val):
-    assert isinstance(val, Value), "TypeError"
-    assert not isinstance(val, LinkValue), "InternalError"
-    if isinstance(val, IntValue):
-        return bool(val.value)
-    elif isinstance(val, StrValue):
-        return bool(val.value)
-    elif isinstance(val, ListValue):
-        return bool(val.len())
-    elif val == NONE:
+    if val is NONE:
         return False
+    if isinstance(val, IntValue):
+        return val.value != 0
+    if isinstance(val, StrValue):
+        return len(val.value) != 0
+    if isinstance(val, ListValue):
+        return val.len() != 0
+    if isinstance(val, FloatValue):
+        return not (-epsilon < val.value < epsilon)
     return True
 
-
-BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "or", "len", "idx", "simple_idx", "simple_idx=", "[]"]
-BUILTIN_SIDES = ["print", "append"]
-BUILTIN_OPS = list(map(str, BUILTIN_OPS))
-BUILTIN_SIDES = list(map(str, BUILTIN_SIDES))
-
 @look_inside
 @elidable
-def new_regs(frame_size):
-    return [ZERO, ONE] + [NONE]*(const(frame_size))
+def to_bool_value(boolean):
+    assert isinstance(boolean, bool), "TypeError"
+    return TRUE if boolean else FALSE
 
 @look_inside
-@elidable
-def reg_index(regs, idx):
+def env_load(env, idx):
+    assert isinstance(env, ENV_TYPE), "TypeError"
     if idx == 0:
         return ZERO
-    elif idx == 1:
+    if idx == 1:
         return ONE
+    assert idx < const(len(env)), "InternalError"
+    value = env[idx]
+    if value is None:
+        raise_error(u"InternalError: trying to load undefined from env")
+    return value
+
+@look_inside
+def env_store(env, idx, value, chk=True):
+    assert isinstance(env, ENV_TYPE), "TypeError"
+    if (value is None) and chk:
+        raise_error(u"InternalError: trying to store undefined inside env")
+    assert idx < const(len(env)), "InternalError"
+    env[idx] = value
+
+@look_inside
+def attr_vals_load(attr_vals, idx, chk=True):
+    assert isinstance(attr_vals, list), "TypeError"
+    assert idx < len(attr_vals), "InternalError"
+    value = attr_vals[idx]
+    if (value is None) and chk:
+        raise_error(u"InternalError: trying to load undefined from attrs")
+    return value
+
+@look_inside
+def attr_vals_store(attr_vals, idx, value):
+    if value is None:
+        raise_error(u"InternalError: trying to store undefined inside attrs")
+    assert idx < len(attr_vals), "InternalError"
+    attr_vals[idx] = value
+
+@unroll_safe
+@look_inside
+def attr_vals_extend_until_len(attr_vals, new_length):
+    assert isinstance(attr_vals, list), "TypeError"
+    while len(attr_vals) < new_length:
+        attr_vals.append(None)
+
+@unroll_safe
+@look_inside
+def attr_access(mros, attr_matrix, lens, obj, attr, storing):
+    # Use the mro to figure out where attr is supposed to be
+    mro = hint(mros[const(obj.type)], promote=True)
+    if obj.type&1:
+        mro = [obj] + mro
+    for cls in mro:
+        if (cls is not obj) and storing:
+            continue
+        assert 0 <= cls.type < len(attr_matrix), "InternalError"
+        row = attr_matrix[cls.type]
+        assert 0 <= attr < len(row), "InternalError"
+        soft, attr_idx = hint(row[attr], promote=True)
+        soft, attr_idx = const(soft), const(attr_idx)
+        if attr_idx != -1:
+            if soft and (cls.type&1):
+                if (attr_idx >= len(cls.attr_vals)) or (cls.attr_vals[attr_idx] is None):
+                    continue
+            break
+    # Create the attr space in cls if attr_idx is -1
     else:
-        return regs[idx]
+        cls = obj
+        attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
+        assert 0 <= attr_idx, "InternalError"
+        assert 0 <= cls.type < len(attr_matrix), "InternalError"
+        row = attr_matrix[cls.type]
+        assert 0 <= attr < len(row), "InternalError"
+        row[attr] = (False, attr_idx)
+    if len(cls.attr_vals) <= attr_idx:
+        attr_vals_extend_until_len(cls.attr_vals, attr_idx+1)
+    return cls, attr_idx
 
+@look_inside
+@elidable # Since teleports is constant we can mark this as elidable
+def teleports_get(teleports, label):
+    teleports = hint(teleports, promote=True)
+    label = const_str(label)
+    result = teleports.get(label, None)
+    result = const(result)
+    return result
 
+@look_inside
+def copy_and_bind_func(func, obj):
+    assert isinstance(func, FuncValue), "TypeError"
+    assert isinstance(obj, Value), "TypeError"
+    return FuncValue(func.tp, func.masters, func.env_size, func.nargs, func.name, obj)
+
+@look_inside
+def _c3_merge(mros):
+    # Stolen from: https://stackoverflow.com/a/54261655/11106801
+    if len(mros) == 0:
+        return []
+    for mro in mros:
+        assert isinstance(mro, list), "TypeError"
+        for cls in mro:
+            assert isinstance(cls, ObjectValue), "TypeError"
+    for mro in mros:
+        candidate = mro[0]
+        failed = False
+        for mro in mros:
+            if failed: break
+            for tail in mro[1:]:
+                if tail == candidate:
+                    failed = True
+                    break
+        if not failed:
+            tails = []
+            for mro in mros:
+                if mro[0] is candidate:
+                    if len(mro) > 1:
+                        tails.append(mro[1:])
+                    continue
+                tails.append(mro)
+            return [candidate] + _c3_merge(tails)
+            # return [candidate] + _c3_merge([tail if head is candidate else [head, *tail] for head, *tail in mros])
+    raise_type_error(u"No legal mro")
+
+@look_inside
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
     data = bytes2(data_unicode)
-    data = data.replace(".", ",")
     while data[-1] == "\n":
         data = data[:-1]
     return data
 
 
+class VirtualisableArray:
+    # With help from @cfbolz <https://github.com/pypy/pypy/issues/5166>
+    # Doesn't work with recursion
+    _immutable_fields_ = ["array"]
+    _virtualizable_ = ["array[*]"]
+    __slots__ = "array"
+
+    @look_inside
+    def __init__(self, size):
+        self = hint(self, access_directly=True, fresh_virtualizable=True)
+        self.array = [None]*const(size)
+
+    @look_inside
+    def __getitem__(self, key):
+        assert key >= 0, "ValueError"
+        return self.array[key]
+
+    @look_inside
+    def __setitem__(self, key, value):
+        assert key >= 0, "ValueError"
+        self.array[key] = value
+
+    @look_inside
+    @elidable
+    def __len__(self):
+        return len(self.array)
+
+
+ENV_IS_LIST = True
+STACK_IS_LIST = False # if TRUE: super slow on raytracer
+ENV_IS_VIRTUALISABLE = False
+
+if not ENV_IS_LIST:
+    assert not ENV_IS_VIRTUALISABLE, "Invalid compile settings"
+    raise NotImplementedError("No longer supported")
+if ENV_IS_VIRTUALISABLE:
+    if ENTER_JIT_FUNC_CALL or ENTER_JIT_FUNC_RET:
+        raise NotImplementedError("ENV_IS_VIRTUALISABLE breaks the interpreter if either ENTER_JIT_FUNC_CALL or ENTER_JIT_FUNC_RET")
+    raise NotImplementedError("This doesn't work no matter what settings I provide :/")
+    ENV_TYPE = VirtualisableArray
+else:
+    ENV_TYPE = list
+
 if USE_JIT:
-    def get_location(pc, bytecode, _=None):
+    def get_location(_, __, pc, bytecode, *___):
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
-    jitdriver = JitDriver(greens=["pc","bytecode","teleports"], reds=["stack","env","regs"], get_printable_location=get_location)
+    virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
+    jitdriver = JitDriver(greens=["CLEAR_AFTER_USE","frame_size","pc","bytecode","teleports","SOURCE_CODE"],
+                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","mros","global_scope"],
+                          virtualizables=virtualizables, get_printable_location=get_location)
 
 
-class Interpreter:
-    __slots__ = "bytecode", "frame_size"
+# Stack linked list
+class StackFrame:
+    _immutable_fields_ = ["env", "pc", "func", "ret_reg", "prev_stack"]
+    __slots__ = "env", "pc", "func", "ret_reg", "prev_stack"
 
-    def __init__(self, frame_size, bytecode):
-        assert isinstance(frame_size, int), "TypeError"
-        assert isinstance(bytecode, list), "TypeError"
-        assert frame_size >= 0, "ValueError"
-        self.frame_size = frame_size
-        self.bytecode = bytecode
-
-    def interpret(self):
-        teleports = Dict()
-        for i, bt in enumerate(self.bytecode):
-            if isinstance(bt, Bable):
-                teleports[const(const_str(bt.id))] = const(IntValue(const(i)))
-        for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
-            tp = len(self.bytecode) + i
-            teleports[const(const_str(int_to_str(tp)))] = const(IntValue(tp))
-        regs = [NONE]*(self.frame_size+2)
-        _interpret(self.bytecode, teleports, regs)
+    # @look_inside
+    def __init__(self, env, func, pc, ret_reg, prev_stack):
+        assert isinstance(func, FuncValue), "TypeError"
+        assert isinstance(env, ENV_TYPE), "TypeError"
+        assert isinstance(ret_reg, int), "TypeError"
+        assert isinstance(pc, int), "TypeError"
+        if prev_stack is not None:
+            assert isinstance(prev_stack, StackFrame), "TypeError"
+        self.env = env
+        self.pc = pc
+        self.func = func
+        self.ret_reg = ret_reg
+        self.prev_stack = prev_stack
 
 
-def _interpret(bytecode, teleports, regs):
-    bytecode = [const(bt) for bt in bytecode]
-    pc = 0 # current instruction being executed
-    stack = [] # list[tuple[Env,Regs,Pc,RetReg]]
-    env = Dict()
-    for i, op in enumerate(BUILTIN_OPS+BUILTIN_SIDES):
+# Error traceback helpers
+@look_inside
+def str_count_prefix(string, substring):
+    count = 0
+    while count < len(string):
+        if not string[count*len(substring)].startswith(substring):
+            break
+        count += 1
+    return count
+
+@look_inside
+def str_find(string, substring, from_idx):
+    while from_idx < len(string):
+        if string[from_idx:].startswith(substring):
+            return from_idx
+        from_idx += 1
+    return len(string)
+
+@look_inside
+def _line_from_string(string, line_number):
+    last_line = u""
+    last_idx = 0
+    for _ in range(line_number):
+        idx = str_find(string, u"\n", last_idx)
+        last_line = string[last_idx:idx]
+        last_idx = idx+1
+    return last_line
+
+@look_inside
+def data_from_err_idx(code, err):
+    if err.start[0] == err.start[1] == err.end[0] == err.end[1] == 0:
+        return -1, u"<code missing>", 0, 14, False
+    line_str = _line_from_string(code, err.start[0])
+    start = err.start[1]
+    if err.start[0] == err.end[0]:
+        size = err.end[1] - start
+    else:
+        size = len(line_str)-start+1
+    assert start >= 0, "InternalError"
+    assert size > 0, "InternalError"
+    return err.start[0], line_str, start, size, True
+
+@unroll_safe
+@look_inside
+def mul_isinstance(obj, classes):
+    assert isinstance(classes, list), "TypeError"
+    for Cls in classes:
+        if isinstance(obj, Cls):
+            return True
+    return False
+
+@look_inside
+def get_err_idx_from_bt(bt):
+    assert mul_isinstance(bt, [BCall,BStoreLoadDict,BStoreLoadList,BLiteral,BJump,BLoadLink,BRet,BDotDict,BDotList]), "InternalError"
+    if isinstance(bt, BCall): return bt.err
+    elif isinstance(bt, BStoreLoadDict): return bt.err
+    elif isinstance(bt, BStoreLoadList): return bt.err
+    elif isinstance(bt, BLiteral): return bt.err
+    elif isinstance(bt, BJump): return bt.err
+    elif isinstance(bt, BLoadLink): return bt.err
+    elif isinstance(bt, BRet): return bt.err
+    elif isinstance(bt, BDotDict): return bt.err
+    elif isinstance(bt, BDotList): return bt.err
+    else:
+        assert False, "Impossible"
+
+class InterpreterError(Exception):
+    _immutable_fields_ = ["msg"]
+    __slots__ = "msg"
+
+    def __init__(self, msg):
+        self.msg = msg
+
+
+# Main interpreter
+def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE):
+    if not flags.is_set("ENV_IS_LIST"):
+        print("\x1b[91m[ERROR]: ENV_IS_LIST==false is not longer supported\x1b[0m")
+        raise SystemExit()
+    if frame_size <= 0:
+        print("\x1b[91m[ERROR]: Invalid frame_size in bytecode\x1b[0m")
+        raise SystemExit()
+    # Create teleports
+    teleports = Dict()
+    for i, bt in enumerate(bytecode):
+        if isinstance(bt, Bable):
+            teleports[const_str(bt.id)] = IntValue(i)
+    # Create env
+    # Note that regs is env[:frame_size]
+    if ENV_IS_VIRTUALISABLE:
+        env = VirtualisableArray(env_size + frame_size + 2)
+    else:
+        env = [None]*(env_size + frame_size + 2)
+    envs = hint([env], promote=True)
+    for i, op in enumerate(BUILTINS):
         assert isinstance(op, str), "TypeError"
-        env[op] = FuncValue(i+len(bytecode), env)
+        pure_op = op not in BUILTIN_MODULE_SIDES
+        env[i+frame_size] = FuncValue(i+len(bytecode), envs, pure_op, 0, op, None)
+    for i, op in enumerate(BUILTIN_MODULES):
+        assert isinstance(op, str), "TypeError"
+        env[i+frame_size+len(MODULE_ATTRS)] = SpecialValue(u"module", str_value=op)
+    # Start actual interpreter
+    return _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size)
+
+def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
+    CLEAR_AFTER_USE = const(flags.is_set("CLEAR_AFTER_USE"))
+    SOURCE_CODE = const_str(SOURCE_CODE)
+    pc = 0 # current instruction being executed
+    stack = [] if STACK_IS_LIST else None
+    next_cls_type = 0
+    attr_matrix = hint([], promote=True)
+    lens = hint([], promote=True)
+    mros = hint([], promote=True)
+    func = FuncValue(0, [], 0, 0, u"main-scope", None)
+    global_scope = hint(env, promote=True)
+    frame_size = const(frame_size)
 
     while pc < len(bytecode):
         if USE_JIT:
-            jitdriver.jit_merge_point(stack=stack, env=env, regs=regs, pc=pc, bytecode=bytecode, teleports=teleports)
+            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
-            debug(bytecode_debug_str(pc, bt), 3)
+            debug(str(bytecode_debug_str(pc, bt)), 3)
         pc += 1
 
-        if isinstance(bt, Bable):
-            if USE_JIT:
-                jitdriver.can_enter_jit(stack=stack, env=env, regs=regs, pc=pc-1, bytecode=bytecode, teleports=teleports)
-        elif isinstance(bt, BLoadLink):
-            env[bt.name] = LinkValue(bt.link)
-        elif isinstance(bt, BStoreLoad):
-            scope, value = env, env.get(bt.name, None)
-            # Get the correct scope
-            if isinstance(value, LinkValue):
-                for i in range(value.link):
-                    scope_holder = scope.get(u"$prev_env", None)
-                    assert isinstance(scope_holder, FuncValue), "InternalNonlocalError"
-                    scope = scope_holder.master
-                if not bt.storing:
-                    value = scope.get(bt.name, None)
-            # Store/Load variable
-            if bt.storing:
-                scope[bt.name] = reg_index(regs, bt.reg)
-            else:
+        try:
+            if isinstance(bt, Bable):
+                pass
+
+            elif isinstance(bt, BStoreLoadList):
+                # Get the correct scope
+                if bt.link == 0:
+                    scope = env
+                else:
+                    idx = len(func.masters)-bt.link
+                    if idx == 0:
+                        scope = global_scope
+                    else:
+                        scope = func.masters[idx]
+                # Store/Load variable
+                if bt.storing:
+                    env_store(scope, bt.name+frame_size, env_load(env, bt.reg))
+                else:
+                    env_store(env, bt.reg, env_load(scope, bt.name+frame_size))
+
+            elif isinstance(bt, BDotList):
+                obj = env_load(env, bt.obj_reg)
+                if isinstance(obj, ListValue):
+                    if bt.storing:
+                        raise_name_error(u"cannot change builtin attribute")
+                    if bt.attr not in (LEN_IDX, APPEND_IDX):
+                        raise_name_error(u"Unknown attribute")
+                    env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
+                elif isinstance(obj, StrValue):
+                    if bt.storing:
+                        raise_name_error(u"cannot change builtin attribute")
+                    if bt.attr not in (LEN_IDX,):
+                        raise_name_error(u"Unknown attribute")
+                    env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
+                elif isinstance(obj, SpecialValue):
+                    if obj.type == u"module":
+                        value = None
+                        if obj.str_value == u"io":
+                            if bt.attr not in (PRINT_IDX, OPEN_IDX):
+                                raise_name_error(u"this")
+                            value = global_scope[bt.attr+frame_size]
+                        elif obj.str_value == u"math":
+                            if bt.attr == PI_IDX:
+                                value = PI
+                            elif bt.attr == EPSILON_IDX:
+                                value = EPSILON
+                            else:
+                                if bt.attr not in (SQRT_IDX, SIN_IDX, COS_IDX, TAN_IDX, POW_IDX):
+                                    raise_name_error(u"this")
+                                value = global_scope[bt.attr+frame_size]
+                        else:
+                            raise_name_error(u"this")
+                        env_store(env, bt.reg, value)
+                    elif obj.type == u"file":
+                        if bt.attr not in (READ_IDX, WRITE_IDX, CLOSE_IDX):
+                            raise_name_error(u"this")
+                        env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
+                    else:
+                        raise_unreachable_error(u"TODO . operator on SpecialValue with obj.type=" + obj.type)
+                elif isinstance(obj, ObjectValue):
+                    # Get cls (the object storing attr) and attr_idx (the idx into cls.attr_vals)
+                    cls, attr_idx = attr_access(mros, attr_matrix, lens, obj, bt.attr, bt.storing)
+                    # Use the information above to execute the bytecode
+                    attr_idx = const(attr_idx)
+                    assert 0 <= attr_idx < len(cls.attr_vals), "InternalError"
+                    if bt.storing:
+                        attr_vals_store(cls.attr_vals, attr_idx, env_load(env, bt.reg))
+                    else:
+                        value = attr_vals_load(cls.attr_vals, attr_idx)
+                        if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
+                            value = copy_and_bind_func(value, obj)
+                            _, attr_idx = attr_matrix[obj.type][bt.attr]
+                            if attr_idx == -1:
+                                attr_idx, lens[obj.type] = lens[obj.type], lens[obj.type]+1
+                                attr_matrix[obj.type][bt.attr] = (True, attr_idx)
+                            attr_vals_extend_until_len(obj.attr_vals, attr_idx+1)
+                            attr_vals_store(obj.attr_vals, attr_idx, value)
+                        env_store(env, bt.reg, value)
+                else:
+                    raise_type_error(u". operator expects object got " + get_type(obj) + u" instead")
+
+            elif isinstance(bt, BLiteral):
+                bt_literal = bt.literal
+                if bt.type == BLiteral.INT_T:
+                    assert isinstance(bt_literal, BLiteralInt), "TypeError"
+                    literal = IntValue(bt_literal.value)
+                elif bt.type == BLiteral.FUNC_T:
+                    assert isinstance(bt_literal, BLiteralFunc), "TypeError"
+                    if bt_literal.link == 0:
+                        master = env
+                    else:
+                        master = func.masters[len(func.masters)-bt_literal.link]
+                    tp = teleports[bt_literal.tp_label]
+                    assert isinstance(tp, IntValue), "InternalError"
+                    literal = FuncValue(tp.value, func.masters+[master], bt_literal.env_size, bt_literal.nargs, bt_literal.name, None)
+                elif bt.type == BLiteral.STR_T:
+                    assert isinstance(bt_literal, BLiteralStr), "TypeError"
+                    literal = StrValue(bt_literal.value)
+                elif bt.type == BLiteral.FLOAT_T:
+                    assert isinstance(bt_literal, BLiteralFloat), "TypeError"
+                    literal = FloatValue(bt_literal.value)
+                elif bt.type == BLiteral.NONE_T:
+                    literal = NONE
+                elif bt.type == BLiteral.UNDEFINED_T:
+                    env_store(env, bt.reg, None, chk=False)
+                    continue
+                elif bt.type == BLiteral.LIST_T:
+                    literal = ListValue()
+                elif bt.type == BLiteral.CLASS_T:
+                    assert isinstance(bt_literal, BLiteralClass), "TypeError"
+                    # Create ObjectValue type
+                    _mros = []
+                    for base_reg in bt_literal.bases:
+                        base = env_load(env, base_reg)
+                        if not isinstance(base, ObjectValue):
+                            raise_type_error(u"can't inherit from " + get_type(base))
+                        _mros.append(mros[base.type])
+                    # Register new class
+                    cls_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
+                    for _ in range(2):
+                        row = [(False, -1) for _ in range(len(attrs))]
+                        row = hint(row, promote=True)
+                        row[0] = hint((False, 0), promote=True)
+                        attr_matrix.append(row)
+                    lens.extend([len(SPECIAL_ATTRS),len(SPECIAL_ATTRS)])
+                    literal = ObjectValue(cls_type, bt_literal.name)
+                    while len(mros) <= literal.type: mros.append([])
+                    mros[literal.type] = hint([literal]+_c3_merge(_mros), promote=True)
+                else:
+                    raise NotImplementedError()
+                env_store(env, bt.reg, literal)
+
+            elif isinstance(bt, BJump):
+                value = env_load(env, bt.condition_reg)
+                if CLEAR_AFTER_USE and (bt.condition_reg > 1):
+                    env_store(env, bt.condition_reg, None, chk=False)
                 if value is None:
-                    raise_name_error(bt.name)
-                regs[bt.reg] = value
-        elif isinstance(bt, BLiteral):
-            bt_literal = bt.literal
-            if bt.type == BLiteral.INT_T:
-                assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                literal = IntValue(bt_literal.int_value)
-            elif bt.type == BLiteral.FUNC_T:
-                assert isinstance(bt_literal, BLiteralInt), "TypeError"
-                literal = FuncValue(bt_literal.int_value, env)
-            elif bt.type == BLiteral.STR_T:
-                assert isinstance(bt_literal, BLiteralStr), "TypeError"
-                literal = StrValue(bt_literal.str_value)
-            elif bt.type == BLiteral.NONE_T:
-                literal = NONE
-            elif bt.type == BLiteral.LIST_T:
-                literal = ListValue()
-            else:
-                raise NotImplementedError()
-            regs[bt.reg] = literal
-            del literal, bt_literal
-        elif isinstance(bt, BJump):
-            # WARNING: Bjump always clears condition reg!!!
-            value = reg_index(regs, bt.condition_reg)
-            if bt.condition_reg > 1:
-                regs[bt.condition_reg] = NONE
-            condition = force_bool(value)
-            # if condition != bt.negated: # RPython's JIT can't constant fold bt.negated in this form :/
-            if (condition and (not bt.negated)) or ((not condition) and bt.negated):
-                tp = teleports.get(bt.label, None)
-                assert isinstance(tp, IntValue), "TypeError"
-                pc = tp.value
-                assert isinstance(bytecode[pc], Bable), "InternalError"
-                del tp
-            del value
-        elif isinstance(bt, BRegMove):
-            if bt.reg1 == 2:
-                ret_val = reg_index(regs, bt.reg2)
-                if len(stack) == 0:
-                    if not isinstance(ret_val, IntValue):
-                        raise_type_error(u"exit value should be an int not " + get_type(ret_val))
-                    print(u"[EXIT]: " + int_to_str(ret_val.value))
+                    raise_unreachable_error(u"undefined should never be in regs")
+                condition = force_bool(value)
+                # if condition != bt.negated: # RPython's JIT can't constant fold in this form :/
+                if (condition and (not bt.negated)) or ((not condition) and bt.negated):
+                    tp = teleports_get(teleports, bt.label)
+                    assert isinstance(tp, IntValue), "TypeError"
+                    old_pc, pc = pc, tp.value
+                    assert isinstance(bytecode[pc], Bable), "InternalError"
+                    if USE_JIT and (pc < old_pc): # Tell the JIT about the jump
+                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                                                attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+
+            elif isinstance(bt, BRegMove):
+                env_store(env, bt.reg1, env_load(env, bt.reg2))
+
+            elif isinstance(bt, BRet):
+                old_pc = pc
+                value = env_load(env, bt.reg)
+                env_store(env, bt.reg, None, chk=False)
+                if not stack:
+                    if not isinstance(value, IntValue):
+                        raise_type_error(u"exit value should be an int not " + get_type(value))
+                    print(u"[EXIT]: " + int_to_str(value.value))
                     break
-                env, regs, pc, res_reg = stack.pop()
-                regs[res_reg] = ret_val
-                del ret_val
+                if STACK_IS_LIST:
+                    env, func, pc, ret_reg = stack.pop()
+                else:
+                    env, func, pc, ret_reg = stack.env, stack.func, stack.pc, stack.ret_reg
+                    stack = stack.prev_stack
+                env_store(env, const(ret_reg), value)
+                if USE_JIT and ENTER_JIT_FUNC_RET: # Tell the JIT about the jump
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+                func = hint(func, promote=True)
+
+            elif isinstance(bt, BCall):
+                args = []
+                _func = env_load(env, bt.regs[1])
+                _func = hint(_func, promote=True)
+                if isinstance(_func, ObjectValue) and (_func.type&1 == 0):
+                    self = ObjectValue(_func.type+1, _func.name)
+                    while len(mros) <= self.type: mros.append([])
+                    mros[self.type] = hint(mros[_func.type], promote=True)
+                    args = [self]
+                    _func = const(_func.attr_vals[CONSTRUCTOR_IDX])
+                    if _func is None:
+                        # Default constructor
+                        env_store(env, bt.regs[0], self)
+                        continue
+                    if not isinstance(_func, FuncValue):
+                        raise_type_error(u"constructor should be a function not " + get_type(_func))
+                elif isinstance(_func, FuncValue):
+                    if _func.bound_obj is not None:
+                        args.append(_func.bound_obj)
+                else:
+                    raise_type_error(get_type(_func) + u" is not callable")
+
+                tp_value = _func.tp
+                if tp_value < len(bytecode):
+                    func = const(func) # No idea why I need this :/
+                    # Create a new stack frame
+                    if STACK_IS_LIST:
+                        stack.append((env, func, pc, bt.regs[0]))
+                    else:
+                        stack = StackFrame(env, func, pc, bt.regs[0], stack)
+                    # Set the pc/env/func
+                    func, old_pc, pc, old_env = _func, pc, tp_value, env
+                    if ENV_IS_VIRTUALISABLE:
+                        env = VirtualisableArray(func.env_size+frame_size)
+                    else:
+                        env = [None]*(func.env_size+frame_size)
+                    # Check number of args
+                    if len(bt.regs)-2+len(args) > func.nargs:
+                        raise_type_error(u"too many arguments")
+                    elif len(bt.regs)-2+len(args) < func.nargs:
+                        raise_type_error(u"too few arguments")
+                    # Copy arguments values into new env
+                    for i in range(len(args)):
+                        env_store(env, i+2, args[i])
+                    for i in range(2, len(bt.regs)):
+                        env_store(env, i+len(args), env_load(old_env, bt.regs[i]))
+                    enter_jit = ENTER_JIT_FUNC_CALL
+                else: # Built-ins
+                    op_idx = tp_value - len(bytecode)
+                    pure_op = bool(_func.env_size)
+                    op = BUILTINS[op_idx]
+                    args += [env_load(env, bt.regs[i]) for i in range(2,len(bt.regs))]
+                    for arg in args:
+                        if arg is None:
+                            raise_unreachable_error(u"undefined should never be in regs")
+                    if op_idx == ISINSTANCE_IDX:
+                        value = inner_isinstance(mros, global_scope, frame_size, args)
+                    elif pure_op:
+                        value = builtin_pure(op, args, op)
+                    else:
+                        value = builtin_side(op, args)
+                    env_store(env, bt.regs[0], value)
+                    enter_jit, old_env = False, env
+                # Clear the regs in bt.clear
+                for reg in bt.clear:
+                    env_store(old_env, reg, None, chk=False)
+                if USE_JIT and enter_jit: # Tell the JIT about the jump
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+
+            elif isinstance(bt, BLoadLink) or isinstance(bt, BStoreLoadDict) or isinstance(bt, BDotDict):
+                raise_unreachable_error(u"ENV_IS_LIST==false is not longer supported so this bytecode instruction is illegal")
+
             else:
-                regs[bt.reg1] = reg_index(regs, bt.reg2)
-        elif isinstance(bt, BCall):
-            func = const(reg_index(regs, bt.regs[1]))
-            if not isinstance(func, FuncValue):
-                raise_type_error(get_type(func) + u" is not callable")
-            assert isinstance(func, FuncValue), "TypeError"
-            tp = teleports.get(int_to_str(func.tp), None)
-            if tp is None:
-                raise_name_error(int_to_str(func.tp))
-            assert isinstance(tp, IntValue), "TypeError"
-            tp_value = const(tp.value)
-            if tp_value < len(bytecode):
-                pc, old_pc = tp_value, pc
-                stack.append((env,regs,old_pc,bt.regs[0]))
-                old_regs, regs = regs, list(regs)
-                assert len(old_regs) == len(regs), "InternalError"
-                env = func.master.copy()
-                env[u"$prev_env"] = func
-                for i in range(2, len(bt.regs)):
-                    regs[i+1] = old_regs[bt.regs[i]]
-                assert isinstance(bytecode[pc], Bable), "InternalError"
-                del old_regs
-            else: # Built-ins
-                op_idx = tp_value - len(bytecode)
-                pure_op = op_idx < len(BUILTIN_OPS)
-                if pure_op:
-                    op = BUILTIN_OPS[op_idx]
-                else:
-                    op = BUILTIN_SIDES[op_idx-len(BUILTIN_OPS)]
-                args = [reg_index(regs, bt.regs[i]) for i in range(2,len(bt.regs))]
-                if pure_op:
-                    value = builtin_pure(op, args, op)
-                else:
-                    value = builtin_side(op, args)
-                if bt.regs[0] > 1: # Don't store values inside ZERO,ONE
-                    regs[bt.regs[0]] = value
-                del args, pure_op, op_idx, op, value
-            del tp, tp_value, func
-        del bt
+                raise NotImplementedError("Haven't implemented this bytecode yet")
+
+        except InterpreterError as error:
+            funcs = [(func, pc)]
+            if STACK_IS_LIST:
+                for _, stack_func, _, stack_pc, _ in stack:
+                    funcs.append((stack_func, stack_pc))
+            else:
+                s = stack
+                while s is not None:
+                    funcs.append((s.func, s.pc))
+                    s = s.prev_stack
+            print(u"Traceback (most recent call last):")
+            for i in range(len(funcs)):
+                stack_func, stack_pc = funcs[len(funcs)-i-1]
+                bt = bytecode[stack_pc-1]
+                err_idx = get_err_idx_from_bt(bt)
+                line, line_str, start, size, success = data_from_err_idx(SOURCE_CODE, err_idx)
+                indent = str_count_prefix(line_str, u" ") + str_count_prefix(line_str, u"\t")
+                line_str, start = line_str[indent:], start-indent
+                assert start >= 0, "InternalError"
+                if not success:
+                    continue
+                print(u"   File \x1b[95m<???>\x1b[0m in \x1b[95m<" + stack_func.name + u">\x1b[0m on line \x1b[95m" + int_to_str(line) + u"\x1b[0m:")
+                print(u" "*6 + line_str[:start] + u"\x1b[91m" + line_str[start:start+size] + u"\x1b[0m" + line_str[start+size:])
+                print(u" "*(start+6) + u"\x1b[91m" + u"^"*size + u"\x1b[0m")
+            print(u"\x1b[93m" + error.msg + u"\x1b[0m")
+            return 1
+    return 0
 
 
+@unroll_safe
+@look_inside
+def inner_isinstance(mros, global_scope, frame_size, args):
+    if len(args) != 2:
+        raise_type_error(u"isinstance takes 2 arguments")
+    instance, cls = args
+    if isinstance(cls, FuncValue):
+        output = False
+        if cls is const(global_scope[INT_IDX+frame_size]):
+            output = isinstance(instance, IntValue)
+        elif cls is const(global_scope[FLOAT_IDX+frame_size]):
+            output = isinstance(instance, IntValue) or isinstance(instance, FloatValue)
+        elif cls is const(global_scope[STR_IDX+frame_size]):
+            output = isinstance(instance, StrValue)
+        elif cls is const(global_scope[LIST_IDX+frame_size]):
+            output = isinstance(instance, ListValue)
+        elif cls is const(global_scope[BOOL_IDX+frame_size]):
+            output = isinstance(instance, BoolValue)
+        else:
+            raise_type_error(u"the 2nd argument of isinstance should be a type or a list of types")
+        return to_bool_value(output)
+    elif isinstance(cls, ObjectValue):
+        if not isinstance(instance, ObjectValue):
+            return FALSE
+        if cls.type == instance.type:
+            return TRUE
+        for super_cls in hint(mros[const(cls.type)], promote=True):
+            if super_cls.type == instance.type:
+                return TRUE
+            if instance.type&1:
+                if super_cls.type == instance.type-1:
+                    return TRUE
+        return FALSE
+    elif isinstance(cls, ListValue):
+        for subcls in cls.array:
+            if inner_isinstance(mros, global_scope, frame_size, [instance, subcls]):
+                return TRUE
+        return FALSE
+    else:
+        raise_type_error(u"the 2nd argument of isinstance should be a type")
+
+
+# Builtin helpers
 @look_inside
 def builtin_pure(op, args, op_print):
-    if op in (u"+", u"*", u"==", u"len", u"idx", u"simple_idx"):
+    if op in (u"+", u"*", u"==", u"!=", u"len", u"idx", u"simple_idx"):
         if (len(args) > 0) and isinstance(args[0], ListValue):
             return builtin_pure_list(op, args, op)
         elif (len(args) == 2) and isinstance(args[1], ListValue):
@@ -345,10 +847,8 @@ def builtin_pure(op, args, op_print):
         return builtin_pure_list(op, args, op)
     return builtin_pure_nonlist(op, args, op)
 
-
 @look_inside
 def builtin_pure_list(op, args, op_print):
-    assert len(args) > 0, "InternalError"
     if op == u"+":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
@@ -398,6 +898,11 @@ def builtin_pure_list(op, args, op_print):
             return TRUE
         return FALSE
 
+    elif op == u"!=":
+        v = builtin_pure_list(u"==", args, op_print)
+        assert isinstance(v, BoolValue), "InternalError"
+        return to_bool_value(not v.value)
+
     elif op == u"len":
         if len(args) != 1:
             raise_type_error(op_print + u" expects 1 argument")
@@ -410,37 +915,37 @@ def builtin_pure_list(op, args, op_print):
         if len(args) != 4:
             raise_type_error(op_print + u" expects 4 arguments (list, start, stop, step)")
         arg0, arg1, arg2, arg3 = args
-        if not isinstance(arg0, ListValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
+        assert isinstance(arg0, ListValue), "InternalError" # builtin*_list should only be called with a list arg
         length = arg0.len()
-        if isinstance(arg3, NoneValue): # step
+        start = stop = step = 0 # To make rpython's flowspace happy
+        if arg3 is NONE: # step
             step = 1
         elif isinstance(arg3, IntValue):
             step = arg3.value
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the step arg")
-            return NONE
         if step == 0:
             raise_type_error(op_print + u" doesn't support 0 for the step arg")
-            return NONE
-        if isinstance(arg1, NoneValue): # start
+        if arg1 is NONE: # start
             start = 0 if step > 0 else length
         elif isinstance(arg1, IntValue):
             start = arg1.value
             if start < 0:
                 start += length
+            if start < 0:
+                raise_index_error(u"start-idx = " + int_to_str(start))
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
-            return NONE
-        if isinstance(arg2, NoneValue): # stop
+        if arg2 is NONE: # stop
             stop = -1 if step < 0 else length
         elif isinstance(arg2, IntValue):
             stop = arg2.value
             if stop < 0:
                 stop += length
+            if stop < 0:
+                raise_index_error(u"stop-idx = " + int_to_str(stop))
         else:
             raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
-            return NONE
         new = ListValue()
         for idx in range(start, stop, step):
             if 0 <= idx < length:
@@ -486,45 +991,59 @@ def builtin_pure_list(op, args, op_print):
         return new
 
     else:
-        raise_unreachable_error(u"builtin_pure_list " + op + u" not implemented (needed for " + op_print + u")")
+        if op == op_print:
+            raise_unreachable_error(u"builtin-pure-list " + op + u" not implemented (needed for " + op_print + u")")
+        else:
+            raise_unreachable_error(u"builtin-pure-list " + op + u" not implemented")
 
 
+@unroll_safe
 @look_inside
 def builtin_pure_nonlist(op, args, op_print):
     if op == u"+":
         if len(args) == 1:
             arg = args[0]
-            if not isinstance(arg, IntValue):
-                raise_type_error(op_print + u" expects an int if used with 1 argument")
-            return arg
+            if isinstance(arg, IntValue):
+                return arg
+            elif isinstance(arg, FloatValue):
+                return arg
         elif len(args) == 2:
             arg0, arg1 = args
             if isinstance(arg0, IntValue):
-                if not isinstance(arg1, IntValue):
-                    raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-                return IntValue(arg0.value + arg1.value)
+                if isinstance(arg1, IntValue):
+                    return IntValue(arg0.value + arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value + arg1.value)
             elif isinstance(arg0, StrValue):
-                if not isinstance(arg1, StrValue):
-                    raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-                return StrValue(arg0.value + arg1.value)
-            else:
-                raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+                if isinstance(arg1, StrValue):
+                    return StrValue(arg0.value + arg1.value)
+            elif isinstance(arg0, FloatValue):
+                if isinstance(arg1, IntValue):
+                    return FloatValue(arg0.value + arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value + arg1.value)
         else:
             raise_type_error(op_print + u" expects 1 or 2 arguments")
 
     elif op == u"-":
         if len(args) == 1:
             arg = args[0]
-            if not isinstance(arg, IntValue):
-                raise_type_error(op_print + u" expects an int if used with 1 argument")
-            return IntValue(-arg.value)
+            if isinstance(arg, IntValue):
+                return IntValue(-arg.value)
+            elif isinstance(arg, FloatValue):
+                return FloatValue(-arg.value)
         elif len(args) == 2:
             arg0, arg1 = args
-            if not isinstance(arg0, IntValue):
-                raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-            return IntValue(arg0.value - arg1.value)
+            if isinstance(arg0, IntValue):
+                if isinstance(arg1, IntValue):
+                    return IntValue(arg0.value - arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value - arg1.value)
+            elif isinstance(arg0, FloatValue):
+                if isinstance(arg1, IntValue):
+                    return FloatValue(arg0.value - arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value - arg1.value)
 
     elif op == u"*":
         if len(args) != 2:
@@ -533,97 +1052,245 @@ def builtin_pure_nonlist(op, args, op_print):
         if isinstance(arg0, IntValue):
             if isinstance(arg1, IntValue):
                 return IntValue(arg0.value * arg1.value)
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(arg0.value * arg1.value)
             elif isinstance(arg1, StrValue):
                 return StrValue(arg0.value * arg1.value)
-            else:
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
         elif isinstance(arg0, StrValue):
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-            return StrValue(arg0.value * arg1.value)
-        else:
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+            if isinstance(arg1, IntValue):
+                return StrValue(arg0.value * arg1.value)
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, IntValue):
+                return FloatValue(arg0.value * arg1.value)
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(arg0.value * arg1.value)
 
     elif op == u"%":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
-        if not isinstance(arg0, IntValue):
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
-        if not isinstance(arg1, IntValue):
-            raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-        return IntValue(arg0.value % arg1.value)
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                try:
+                    return IntValue(arg0.value % arg1.value)
+                except ZeroDivisionError:
+                    raise_value_error(u"division by zero")
 
     elif op == u"//":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
-        if not isinstance(arg0, IntValue):
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
-        if not isinstance(arg1, IntValue):
-            raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-        return IntValue(arg0.value // arg1.value)
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                try:
+                    return IntValue(arg0.value // arg1.value)
+                except ZeroDivisionError:
+                    raise_value_error(u"division by zero")
+
+    elif op == u"<<":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value << arg1.value)
+
+    elif op == u">>":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value >> arg1.value)
+
+    elif op == u"&":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value & arg1.value)
+
+    elif op == u"|":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value | arg1.value)
 
     elif op == u"==":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
-            if not isinstance(arg1, IntValue):
-                return FALSE
-            if arg0.value == arg1.value:
-                return TRUE
+            if isinstance(arg1, IntValue):
+                if arg0.value == arg1.value:
+                    return TRUE
+            elif isinstance(arg1, FloatValue):
+                if arg1.value-epsilon < arg0.value < arg1.value+epsilon:
+                    return TRUE
+            return FALSE
         elif isinstance(arg0, StrValue):
             if not isinstance(arg1, StrValue):
                 return FALSE
             if arg0.value == arg1.value:
                 return TRUE
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, IntValue):
+                if arg0.value-epsilon < arg1.value < arg0.value+epsilon:
+                    return TRUE
+            elif isinstance(arg1, FloatValue):
+                if arg0.value-epsilon < arg1.value < arg0.value+epsilon:
+                    return TRUE
+            return FALSE
+        elif arg0 is arg1:
+            return TRUE
         return FALSE
 
     elif op == u"!=":
         v = builtin_pure(u"==", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
-        return FALSE if v.value else TRUE
+        return to_bool_value(not v.value)
 
     elif op == u"<":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-            return BoolValue(arg0.value < arg1.value)
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value < arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value < arg1.value)
         elif isinstance(arg0, StrValue):
-            if not isinstance(arg1, StrValue):
-                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-            return BoolValue(arg0.value < arg1.value)
-        else:
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+            if isinstance(arg1, StrValue):
+                return BoolValue(arg0.value < arg1.value)
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value < arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value < arg1.value)
 
     elif op == u">":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
-            if not isinstance(arg1, IntValue):
-                raise_type_error(u"can't " + op_print + u" int with " + get_type(arg1))
-            return BoolValue(arg0.value > arg1.value)
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value > arg1.value)
         elif isinstance(arg0, StrValue):
-            if not isinstance(arg1, StrValue):
-                raise_type_error(u"can't " + op_print + u" str with " + get_type(arg1))
-            return BoolValue(arg0.value > arg1.value)
-        else:
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print)
+            if isinstance(arg1, StrValue):
+                return BoolValue(arg0.value > arg1.value)
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value > arg1.value)
 
     elif op == u"<=":
         v = builtin_pure(u">", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
-        return FALSE if v.value else TRUE
+        return to_bool_value(not v.value)
 
     elif op == u">=":
         v = builtin_pure(u"<", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
-        return FALSE if v.value else TRUE
+        return to_bool_value(not v.value)
+
+    elif op == u"/":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        try:
+            if isinstance(arg0, IntValue):
+                if isinstance(arg1, IntValue):
+                    return FloatValue(float(arg0.value)/float(arg1.value))
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(float(arg0.value)/arg1.value)
+            elif isinstance(arg0, FloatValue):
+                if isinstance(arg1, IntValue):
+                    return FloatValue(arg0.value/float(arg1.value))
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value/arg1.value)
+        except ZeroDivisionError:
+            raise_value_error(u"division by zero")
+
+    elif op == u"sqrt":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return FloatValue(math.sqrt(arg.value))
+        elif isinstance(arg, FloatValue):
+            return FloatValue(math.sqrt(arg.value))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"pow":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, IntValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(int(math.pow(arg0.value, arg1.value)))
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(math.pow(float(arg0.value), arg1.value))
+        elif isinstance(arg0, FloatValue):
+            if isinstance(arg1, IntValue):
+                return FloatValue(math.pow(arg0.value, float(arg1.value)))
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(math.pow(arg0.value, arg1.value))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"tan":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return FloatValue(math.tan(arg.value*math.pi/180))
+        elif isinstance(arg, FloatValue):
+            return FloatValue(math.tan(arg.value*math.pi/180))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"sin":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return FloatValue(math.sin(arg.value*math.pi/180))
+        elif isinstance(arg, FloatValue):
+            return FloatValue(math.sin(arg.value*math.pi/180))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"str":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        return StrValue(inner_repr(args[0]))
+
+    elif op == u"int":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return arg
+        elif isinstance(arg, FloatValue):
+            return IntValue(int(arg.value))
+        elif isinstance(arg, StrValue):
+            return IntValue(int(arg.value))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"float":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return FloatValue(float(arg.value))
+        elif isinstance(arg, FloatValue):
+            return arg
+        elif isinstance(arg, StrValue):
+            return FloatValue(str_to_float(arg.value))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"or":
         if len(args) != 2:
@@ -631,44 +1298,99 @@ def builtin_pure_nonlist(op, args, op_print):
         arg0, arg1 = args
         return arg0 if force_bool(arg0) else arg1
 
+    elif op == u"not":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects 1 argument")
+        return to_bool_value(not force_bool(args[0]))
+
     elif op == u"len":
         if len(args) != 1:
             raise_type_error(op_print + u" expects 1 argument")
         arg0 = args[0]
-        if not isinstance(arg0, StrValue):
-            raise_type_error(op_print + u" not supported on " + get_type(args[0]))
-        return IntValue(len(arg0.value))
+        if isinstance(arg0, StrValue):
+            return IntValue(len(arg0.value))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"simple_idx":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
-        if not isinstance(arg0, StrValue):
-            raise_type_error(op_print + u" not supported on " + get_type(args[0]))
-        if not isinstance(arg1, IntValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
-        return StrValue(arg0.value[arg1.value])
+        if isinstance(arg0, StrValue):
+            if isinstance(arg1, IntValue):
+                return StrValue(arg0.value[arg1.value])
+            raise_type_error(op_print + u" expects int for the index, got " + get_type(arg1) + u" instead")
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"idx":
         if len(args) != 4:
             raise_type_error(op_print + u" expects 4 arguments")
+        arg0, arg1, arg2, arg3 = args
+        if isinstance(arg0, StrValue):
+            length = len(arg0.value)
+            start = stop = 0 # To make rpython's flowspace happy
+            if arg3 is not NONE:
+                raise_type_error(op_print + u" doesn't support the step arg on str")
+            if arg1 is NONE: # start
+                start = 0
+            elif isinstance(arg1, IntValue):
+                start = arg1.value
+                if start < 0:
+                    start += length
+                if start < 0:
+                    raise_index_error(u"start-idx = " + int_to_str(start))
+            else:
+                raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
+            if arg2 is NONE: # stop
+                stop = length
+            elif isinstance(arg2, IntValue):
+                stop = arg2.value
+                if stop < 0:
+                    stop += length
+                if stop < 0:
+                    raise_index_error(u"stop-idx = " + int_to_str(stop))
+            else:
+                raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
+            return StrValue(arg0.value[start:stop])
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     else:
-        raise_unreachable_error(u"builtin_pure " + op + u" not implemented (needed for " + op_print + u")")
+        if op == op_print:
+            raise_unreachable_error(u"builtin-pure " + op + u" not implemented (needed for " + op_print + u")")
+        else:
+            raise_unreachable_error(u"builtin-pure " + op + u" not implemented")
+
+    if len(args) == 1:
+        arg = args[0]
+        raise_type_error(u"can't use unary " + op_print + u" on " + get_type(arg))
+    elif len(args) == 2:
+        arg0, arg1 = args
+        raise_type_error(u"can't " + op_print + u" " + get_type(arg0) + u" with " + get_type(arg1))
+    else:
+        raise_unreachable_error(u"builtin-pure " + op + u" doesn't handle type error explicitly even though it has > 2 arguments")
 
 
 @look_inside
-@elidable
 def inner_repr(obj):
-    if isinstance(obj, IntValue):
-        return int_to_str(obj.value)
-    elif isinstance(obj, StrValue):
-        return obj.value[1:]
-    elif isinstance(obj, FuncValue):
-        return u"Func"
-    elif isinstance(obj, NoneValue):
+    if obj is None:
+        return u"undefined"
+    if obj is NONE:
         return u"none"
+    elif isinstance(obj, IntValue):
+        return int_to_str(obj.value)
+    elif isinstance(obj, FloatValue):
+        return str(bytes2(obj.value))
+    elif isinstance(obj, StrValue):
+        return obj.value
+    elif isinstance(obj, FuncValue):
+        string = u"Func<"
+        bound_obj = obj.bound_obj
+        if bound_obj is not None:
+            if isinstance(bound_obj, ObjectValue):
+                string += bound_obj.name + u"."
+            else:
+                string += get_type(bound_obj) + u"<object>."
+        string += obj.name + u">"
+        return string
     elif isinstance(obj, ListValue):
         string = u"["
         for i, element in enumerate(obj.array):
@@ -676,6 +1398,18 @@ def inner_repr(obj):
             if i != obj.len()-1:
                 string += u", "
         return string + u"]"
+    elif isinstance(obj, ObjectValue):
+        if obj.type & 1:
+            return u"<Object " + obj.name + u">"
+        else:
+            return u"<Class " + obj.name + u">"
+    elif isinstance(obj, SpecialValue):
+        if obj.type == u"module":
+            return u"<Module " + obj.str_value + u">"
+        elif obj.type == u"file":
+            return u"<File fd=" + int_to_str(obj.int_value) + u">"
+        else:
+            return u"<Unknown special value>"
     else:
         return get_type(obj) + u" doesn't support repr"
 
@@ -689,56 +1423,185 @@ def builtin_side(op, args):
                 string += u" "
         print(u"[STDOUT]: " + string)
         return NONE
+
     elif op == u"append":
         if len(args) != 2:
-            raise_type_error(op + u" expected 2 arguments")
+            raise_type_error(op + u" expects 2 arguments")
         arg0, arg1 = args
         if not isinstance(arg0, ListValue):
-            raise_type_error(op + u" expected a list as its 1st argument")
+            raise_type_error(op + u" expects list for the 1st arg")
         arg0.append(arg1)
         return NONE
-    raise_unreachable_error(u"Builtin " + op + u" not implemented")
-    assert False, "Unreachable"
+
+    elif op == u"open":
+        if len(args) != 2:
+            raise_type_error(op + u" expects 2 arguments")
+        path, mode = args
+        if not isinstance(path, StrValue):
+            raise_type_error(op + u" expects str for the 1st arg")
+        if not isinstance(mode, StrValue):
+            raise_type_error(op + u" expects str for the 2nd arg")
+        r = w = a = b = False
+        for char in mode.value:
+            if char == u"r":
+                if r:
+                    raise_value_error(u"invalid file open mode")
+                r = True
+            elif char == u"w":
+                if w:
+                    raise_value_error(u"invalid file open mode")
+                w = True
+            elif char == u"b":
+                if b:
+                    raise_value_error(u"invalid file open mode")
+                b = True
+            elif char == u"a":
+                if a:
+                    raise_value_error(u"invalid file open mode")
+                a = True
+            else:
+                raise_value_error(u"invalid file open mode")
+        if (r and a) or (w and a) or ((not r) and (not w) and (not a)):
+            raise_value_error(u"invalid file open mode")
+        int_flags = 0
+        if r and w:
+            int_flags |= os.O_RDWR | os.O_CREAT | os.O_TRUNC
+        elif r:
+            int_flags |= os.O_RDONLY
+        elif w:
+            int_flags |= os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        elif a:
+            int_flags |= os.O_APPEND
+        fd = os.open(bytes2(path.value), int_flags, 0o777) | (b<<10)
+        return SpecialValue(u"file", int_value=fd)
+
+    elif op == u"write":
+        if len(args) != 2:
+            raise_type_error(op + u" expects 2 arguments")
+        file, data = args
+        if not isinstance(file, SpecialValue):
+            raise_type_error(op + u" expects a file for the 1st arg")
+        fd = file.int_value
+        if fd == -1:
+            raise_runtime_error(u"file already closed")
+        binary = False
+        if fd & (1<<10):
+            binary = True
+            fd ^= 1<<10 # turn off the 1<<10 bit
+        if binary:
+            raise_type_error(u"bytes objects have not been implemented")
+        else:
+            if not isinstance(data, StrValue):
+                raise_type_error(op + u" expects a str, got " + get_type(data) + u" instead")
+            os.write(fd, bytes(data.value))
+        return NONE
+
+    elif op == u"read":
+        if len(args) != 2:
+            raise_type_error(op + u" expects 2 arguments")
+        file, length = args
+        if not isinstance(file, SpecialValue):
+            raise_type_error(op + u" expects a file for the 1st arg")
+        if not isinstance(length, IntValue):
+            raise_type_error(op + u" expects an int, got " + get_type(length) + u" instead")
+        fd = file.int_value
+        if fd == -1:
+            raise_runtime_error(u"file already closed")
+        binary = False
+        if fd & (1<<10):
+            binary = True
+            fd ^= 1<<10 # turn off the 1<<10 bit
+        data = os.read(fd, length.value)
+        ret = NONE # to make rpython's flowspace happy
+        if binary:
+            raise_type_error(u"bytes objects have not been implemented")
+        else:
+            ret = StrValue(str(data))
+        return ret
+
+    elif op == u"close":
+        if len(args) != 1:
+            raise_type_error(op + u" expects only 1 argument")
+        file = args[0]
+        if not isinstance(file, SpecialValue):
+            raise_type_error(op + u" expects a file for the 1st arg")
+        fd = file.int_value
+        os.close((fd^(1<<10)) if fd & (1<<10) else fd)
+        file.int_value = -1 # mark it as closed
+        return NONE
+
+    elif op == u"read":
+        if len(args) != 1:
+            raise_type_error(op + u" expects only 1 argument")
+        file, length = args
+        if not isinstance(file, SpecialValue):
+            raise_type_error(op + u" expects a file for the 1st arg")
+        if not isinstance(length, IntValue):
+            raise_type_error(op + u" expects an int for the 2nd arg")
+        fd = file.int_value
+        os.close((fd^(1<<10)) if fd & (1<<10) else fd)
+        return NONE
+
+    else:
+        raise_unreachable_error(u"builtin-side " + op + u" not implemented (needed for " + op + u")")
+
+    raise_unreachable_error(u"builtin-side invalid type error raising")
 
 
+# Error helpers (note they all print traceback)
 def raise_name_error(name):
-    print(u"\x1b[91mNameError: " + name + u" was not been defined\x1b[0m")
-    raise_error()
+    assert isinstance(name, str), "TypeError"
+    raise_error(u"NameError: " + name + u" has not been defined")
 
 def raise_index_error(msg):
-    print(u"\x1b[91mIndexError: " + msg + u"\x1b[0m")
-    raise_error()
+    assert isinstance(msg, str), "TypeError"
+    raise_error(u"IndexError: " + msg)
 
 def raise_type_error(msg):
-    print(u"\x1b[91mTypeError: " + msg + u"\x1b[0m")
-    raise_error()
+    assert isinstance(msg, str), "TypeError"
+    raise_error(u"TypeError: " + msg)
 
 def raise_unreachable_error(msg):
-    print(u"\x1b[91mUnreachable reached: " + msg + u"\x1b[0m")
-    raise_error()
+    assert isinstance(msg, str), "TypeError"
+    raise_error(u"Unreachable reached: " + msg)
 
-def raise_error():
-    raise Exception("\x1b[91m[ERROR]\x1b[0m")
+def raise_value_error(msg):
+    assert isinstance(msg, str), "TypeError"
+    raise_error(u"ValueError: " + msg)
+
+def raise_runtime_error(msg):
+    assert isinstance(msg, str), "TypeError"
+    raise_error(u"RuntimeError: " + msg)
+
+def raise_error(msg):
+    assert isinstance(msg, str), "TypeError"
+    raise InterpreterError(msg)
 
 
+# Main code that reads and deserialises the bytecode
 def _main(raw_bytecode):
     assert isinstance(raw_bytecode, bytes), "TypeError"
     debug(u"Derialising bytecode...", 2)
-    data = derialise(raw_bytecode)
-    debug(u"Creatng interpreter...", 2)
-    interpreter = Interpreter(*data)
+    flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE = derialise(raw_bytecode)
+    debug(u"Parsing flags...", 2)
     debug(u"Starting interpreter...", 1)
-    interpreter.interpret()
+    return interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE)
 
 def main(filepath):
     debug(u"Reading file...", 2)
     with open(filepath, "rb") as file:
         data = file.read()
-    _main(data)
+    return _main(data)
 
 
+# For testing (note runs with PYTHON == 3)
 if __name__ == "__main__":
+    if PYTHON == 3:
+        from time import perf_counter
+        start = perf_counter()
     main("../code-examples/example.clizz")
+    if PYTHON == 3:
+        print("Time taken: {:.3f}".format(perf_counter()-start))
 
 
 # https://github.com/aheui/rpaheui/blob/main/LOG.md
@@ -746,4 +1609,13 @@ if __name__ == "__main__":
 # https://pypy.org/posts/2011/03/controlling-tracing-of-interpreter-with_15-3281215865169782921.html
 # https://web.archive.org/web/20170929153251/https://bitbucket.org/brownan/pypy-tutorial/src/tip/example4.py
 # https://doi.org/10.1016/j.entcs.2016.12.012
+# https://eprints.gla.ac.uk/113615/
+# https://www.hpi.uni-potsdam.de/hirschfeld/publications/media/Pape_2021_EfficientCompoundValuesInVirtualMachines_Dissertation.pdf
 # /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/rlib/jit.py
+# https://github.com/pypy/pypy/issues/5166
+# https://github.com/pypy/pypy/issues/5181
+# https://github.com/pypy/pypy/issues/5184
+# https://rpython.readthedocs.io/en/latest/jit/optimizer.html
+# /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/jit/metainterp/optimizeopt
+# https://github.com/hanabi1224/Programming-Language-Benchmarks/tree/main
+# https://en.wikipedia.org/wiki/Comparison_of_functional_programming_languages

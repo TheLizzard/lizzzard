@@ -5,7 +5,7 @@ except ImportError:
 
 
 class JitDriverDummy(object):
-    def __init__(self, greens, reds, get_printable_location):
+    def __init__(self, **kwargs):
         pass
 
     def jit_merge_point(self, **kwargs):
@@ -19,7 +19,8 @@ if PYTHON == 2:
     try:
         from rpython.rlib.jit import JitDriver, elidable, promote, \
                                      promote_unicode, jit_debug, hint, \
-                                     look_inside, dont_look_inside
+                                     look_inside, dont_look_inside, \
+                                     loop_invariant, unroll_safe
         from rpython.rlib.objectmodel import specialize
         from rpython.rlib.nonconst import NonConstant
         never = lambda: NonConstant(False)
@@ -52,11 +53,14 @@ if NO_RPYTHON:
     look_inside = identity
     never = lambda: None
     dont_look_inside = identity
+    loop_invariant = identity
+    unroll_safe = identity
 
 const_str = promote_unicode
 const = promote
 
-USE_JIT = False
 USE_JIT = True
+ENTER_JIT_FUNC_CALL = True
+ENTER_JIT_FUNC_RET = True
 
 # https://readthedocs.org/projects/ppc/downloads/pdf/latest/

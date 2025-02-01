@@ -2,57 +2,56 @@
 Functional language with rpython's tracing JIT compiler
 
 # Implemented
-| Feature        | Lexer | Parser | IR1 | Semantic analyser | Type checker | IR2 | Interpreter |
-| :------------- | ----: | -----: | --: | ----------------: | -----------: | --: | ----------: |
-| BasicOp        |     ✔ |      ✔ |   ✔ |                   |              |     |      mostly |
-| Func           |     ✔ |      ✔ |     |                   |              |     |           ✔ |
-| Proc           |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| Class          |     ✔ |      ✔ |     |                   |              |     |             |
-| Record         |     ✔ |      ✔ |     |                   |              |     |             |
-| Assginment     |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| Variables      |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| IfExpr         |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| If             |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| While          |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| Return         |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| Break/Continue |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| MatchCase      |     ✔ |      ✔ |     |                   |              |     |             |
-| NonLocal       |     ✔ |      ✔ |   ✔ |                   |              |     |           ✔ |
-| For            |     ✔ |      ✔ |     |                   |              |     |           - |
-| Yield          |     ✔ |      ✔ |     |                   |              |     |             |
-| With           |     ✔ |      ✔ |     |                   |              |     |             |
-| Exceptions     |     ✔ |      ✔ |     |                   |              |     |             |
-| Comprehension  |     ✔ |        |     |                   |              |     |           - |
-| Partial funcs  |     ✔ |      ✔ |     |                   |              |     |           - |
+| Feature        | Lexer | Parser | IR1 | Semantic analyser | IR2 | Interpreter |
+| :------------- | ----: | -----: | --: | ----------------: | --: | ----------: |
+| BasicOp        |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| Func           |     ✔ |      ✔ |     |                   |   - |           - |
+| Proc           |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| Class          |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| Record         |     ✔ |      ✔ |     |                   |   - |           - |
+| Assginment     |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| Variables      |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| IfExpr         |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| If             |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| While          |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| Return         |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| Break/Continue |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| MatchCase      |     ✔ |      ✔ |     |                   |     |             |
+| NonLocal       |     ✔ |      ✔ |   ✔ |                 ✔ |   ✔ |           ✔ |
+| For            |     ✔ |      ✔ |     |                   |   - |           - |
+| Yield          |     ✔ |      ✔ |     |                   |     |             |
+| With           |     ✔ |      ✔ |     |                   |     |             |
+| Exceptions     |     ✔ |      ✔ |     |                   |     |             |
+| Comprehension  |     ✔ |        |   - |                 - |   - |           - |
+| Partial funcs  |     ✔ |      ✔ |   - |                 - |   - |           - |
 
 
-| Type     | Lexer | Parser | IR1 | Interpreter |
-| :------- | ----: | -----: | --: | ----------: |
-| Int64    |     ✔ |      ✔ |   ✔ |           ✔ |
-| Int      |     ✔ |      ✔ |     |             |
-| Str      |     ✔ |      ✔ |   ✔ |           ✔ |
-| None     |     ✔ |      ✔ |   ✔ |           ✔ |
-| List     |     ✔ |      ✔ |   ✔ |           ✔ |
-| Tuples   |     ✔ |      ✔ |     |             |
-| Class    |     ✔ |      ✔ |     |             |
-| Dict/Set |     ✔ |      ✔ |     |             |
+| Type     | Lexer | Parser | IR | Interpreter |
+| :------- | ----: | -----: | -: | ----------: |
+| Int64    |     ✔ |      ✔ |  ✔ |           ✔ |
+| Int      |     ✔ |      ✔ |    |             |
+| Str      |     ✔ |      ✔ |  ✔ |           ✔ |
+| None     |     ✔ |      ✔ |  ✔ |           ✔ |
+| List     |     ✔ |      ✔ |  ✔ |           ✔ |
+| Tuples   |     ✔ |      ✔ |    |             |
+| Class    |     ✔ |      ✔ |  ✔ |           ✔ |
+| Dict/Set |     ✔ |      ✔ |    |             |
 
 
 # Missing from interpreter
-* classes/records (still thinking about the object model)
 * match/case (requires records)
-* partial func syntax desugaring (needs to be implemented in the parser/bytecoder/semantic analyser)
-* destructuring assignment (needs to be implemented in the bytecoder)
-* booleans (instead of reusing `IntValue`)
-* for loops (still thinking)
-* dict/set (still thinking)
+* destructuring assignment (requires object model)
+* for loops (requires object model)
+* dict/set/bool (requires object model - will be implemented inside lizzzard)
+* error messages inside the interpreter
+* variable capture for func/proc/partial (still thinking about it)
 
 # Missing from interpreter (can be implemented later on)
 * yield (still thinking about it)
 * with/raise (still thinking about it)
 * arbitrary size int (requires object model)
-* comprehension (needs to be implemented in the parser+bytecoder)
+* comprehension (needs to be implemented in the parser)
 
 # Interpreter speed improvements
-* optimise away env and only use regs (requires semantic analyser)
-* optimise away useless operations after JIT (requires more experiments/rpython stackoverflow question)
+* a bytecode optimiser should be able to cut the number of instructions by ~15% but the speed increase might be negligible
+* optimise away useless operations after JIT (pypy issue #5166)

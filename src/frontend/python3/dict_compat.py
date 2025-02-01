@@ -16,6 +16,8 @@ class Dict:
     def __init__(self):
         self.buckets = [[] for i in range(_DICT_LENGTH)]
 
+    # This shouldn't really be elidable when (not ENV_IS_LIST)
+    #   but it makes it 10x faster when (ENV_IS_LIST)
     @look_inside
     @elidable
     def get(self, key, default):
@@ -23,6 +25,10 @@ class Dict:
             if k == key:
                 return v
         return default
+
+    @look_inside
+    def __getitem__(self, key): # Returns None if KeyError
+        return self.get(key, None)
 
     @look_inside
     def copy(self):

@@ -4,9 +4,15 @@ set -e
 SCRIPT_DIR="$(dirname "$(realpath --no-symlinks "$0")")"
 cd "$SCRIPT_DIR"
 
-# --opt=jit
 echo -e "\x1b[96m[DEBUG]: Compiling\x1b[0m"
-python2.7 rpython/bin/rpython -Ojit targetlizzzard.py
+if [[ "x$1" == "x+JIT" ]]; then
+    python2.7 rpython/bin/rpython -Ojit targetlizzzard.py
+elif [[ "x$1" == "x-JIT" ]]; then
+    python2.7 rpython/bin/rpython targetlizzzard.py
+else
+    echo -e "\x1b[91m[ERROR]: Please specify either \x1b[92m\"-JIT\"\x1b[91m or \x1b[92m\"+JIT\"\x1b[0m"
+    exit 1
+fi
 
 echo -e "\x1b[96m[DEBUG]: Cleaning up\x1b[0m"
 find . -name "*.pyc" -delete || true

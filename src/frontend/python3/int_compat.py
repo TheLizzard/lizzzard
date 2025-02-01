@@ -3,6 +3,7 @@ from .star import *
 
 
 if PYTHON == 2:
+    @look_inside
     @elidable
     def int_to_bytes(integer, size):
         assert isinstance(integer, int), "TypeError"
@@ -25,6 +26,7 @@ else:
 
 
 if PYTHON == 2:
+    @look_inside
     @elidable
     def int_from_bytes(data):
         result = 0
@@ -39,6 +41,7 @@ else:
 
 
 if PYTHON == 2:
+    @look_inside
     @elidable
     def int_to_str(data, zfill=0):
         assert isinstance(data, int), "TypeError"

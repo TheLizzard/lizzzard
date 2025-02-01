@@ -18,15 +18,18 @@ class Parser:
         BLOCK_END = "" if USING_COLON else "}"
         self.tokeniser:Tokeniser = tokeniser
 
+    def get_all_text(self) -> str:
+        return self.tokeniser.get_all_text()
+
     def throw(self, msg:str, node:Cmd|Expr) -> None:
-        self.tokeniser.throw(msg, get_first_token(node))
+        get_first_token(node).throw(msg)
 
     def _assert_read(self, expected:str, error_msg:str="") -> Token:
         assert isinstance(error_msg, str), "TypeError"
         assert isinstance(expected, str), "TypeError"
         token:Token = self.tokeniser.read()
         if token != expected:
-            self.tokeniser.throw(error_msg, token)
+            token.throw(error_msg)
         return token
 
     def _try_read(self, token:str) -> bool:
@@ -70,7 +73,10 @@ class Parser:
     # Read file/block/line
     def read(self) -> Body|None:
         try:
-            return self._read_block(indented=False)
+            ast:Body = self._read_block(indented=False)
+            assert_partials(ast)
+            simplify(ast)
+            return ast
         except FinishedWithError as error:
             print(f"\x1b[91mSyntaxError: {error.msg}\x1b[0m", file=stderr)
 
@@ -149,8 +155,10 @@ class Parser:
             cmd:Cmd|None = self._read_line__partial()
             if cmd is not None:
                 output.append(cmd)
-            if not self._try_read(";"):
-                return output
+            if self._try_read(";"):
+                if self.tokeniser.peek() not in NOT_EXPR:
+                    continue
+            return output
 
     def _read_line__partial(self) -> Cmd|None:
         """
@@ -161,35 +169,35 @@ class Parser:
         if token == "if":
             self._assert_read("if")
             exp:Expr = self._read_expr()
-            true:Body = self._read_line__colon_block()
+            true, last_token = self._read_line__colon_block()
             if self._try_read_after_newlines("else"):
-                if self.tokeniser.peek() == "if":
+                next_token:Token = self.tokeniser.peek()
+                if next_token == "if":
                     false:Body = self._read_line()
-                elif self.tokeniser.peek() == BLOCK_START:
-                    false:Body = self._read_line__colon_block()
+                elif next_token == BLOCK_START:
+                    false, _ = self._read_line__colon_block()
                 else:
-                    self.tokeniser.throw(f'Expected "{BLOCK_START}" or "if"')
+                    next_token.throw(f'Expected "{BLOCK_START}" or "if"')
             else:
                 false:Body = []
-            return If(token, exp, true, false)
+            return If(token, last_token, exp, true, false)
         elif token == "while":
             self._assert_read("while")
             exp:Expr = self._read_expr()
-            true:Body = self._read_line__colon_block()
-            return While(token, exp, true)
+            true, last_token = self._read_line__colon_block()
+            return While(token, last_token, exp, true)
         elif token == "for":
             self._assert_read("for")
             identifier:Assignable = self._read_expr()
             self._assert_check_assignable(identifier)
-            self._assert_read("in", 'Expected "in" after ' \
-                                    '"for <identifier>"')
+            self._assert_read("in", 'Expected "in" token here')
             exp:Expr = self._read_expr()
-            body:Body = self._read_line__colon_block()
+            body, last_token = self._read_line__colon_block()
             if self._try_read_after_newlines("else"):
                 nobreak:Body = self._read_line_colon_block()
             else:
                 nobreak:Body = []
-            return For(token, identifier, exp, body, nobreak)
+            return For(token, last_token, identifier, exp, body, nobreak)
         elif token in ("return", "yield"):
             self._assert_read(token.token)
             exp:Expr = None
@@ -204,11 +212,11 @@ class Parser:
                 self._assert_read(token.token)
                 n:int = int(token.token)
                 if n < 1:
-                    self.tokeniser.throw("Break/Continue can only be used " \
-                                         "with a +ve integer literal", token)
+                    token.throw("Break/Continue can only be used " \
+                                "with a +ve integer literal")
             else:
                 n:int = 1
-            return BreakContinue(_type, n, _type=="break")
+            return BreakContinue(_type, token, n, _type=="break")
         elif token == "with":
             exp = var = None
             self._assert_read("with")
@@ -217,7 +225,7 @@ class Parser:
                 if self._try_read("as"):
                     var:Assignable = self._read_expr()
                     self._assert_check_assignable(var)
-            code:Body = self._read_line__colon_block()
+            code, last_token = self._read_line__colon_block()
             catch:list[tuple[list[Var],Expr,Body]] = []
             fin, noerror = [], []
             while self._try_read_after_newlines("except"):
@@ -231,12 +239,13 @@ class Parser:
                     if self._try_read("as"):
                         catch_var:Expr = self._read_expr()
                         self._assert_check_assignable(catch_var)
-                catch.append((excs, catch_var, self._read_line__colon_block()))
+                catch_body, _ = self._read_line__colon_block()
+                catch.append((excs, catch_var, catch_body))
             if self._try_read_after_newlines("finally"):
-                fin:Body = self._read_line__colon_block()
+                fin, _ = self._read_line__colon_block()
             if self._try_read_after_newlines("else"):
-                noerror:Body = self._read_line__colon_block()
-            return With(token, var, exp, code, catch, fin, noerror)
+                noerror, _ = self._read_line__colon_block()
+            return With(token, last_token, var, exp, code, catch, fin, noerror)
         elif token == "raise":
             self._assert_read("raise")
             exp:Expr = None
@@ -249,7 +258,7 @@ class Parser:
             while True:
                 identifier:Token = self.tokeniser.read()
                 if not identifier.isidentifier():
-                    self.tokeniser.throw("Expected identifier", identifier)
+                    identifier.throw("Expected identifier")
                 identifiers.append(identifier)
                 if not self._try_read(","):
                     break
@@ -260,17 +269,18 @@ class Parser:
         elif token == "match":
             self._assert_read("match")
             exp:Expr = self._read_expr()
-            cases:list[MatchCase] = self._read_line__colon_block()
+            cases, last_token = self._read_line__colon_block()
             for case in cases:
                 if not isinstance(case, MatchCase):
                     self.throw('Expected "case" here', case)
-            return Match(token, exp, cases)
+            return Match(token, last_token, exp, cases)
         elif token == "case":
             self._assert_read("case")
             exp:Expr = self._read_expr()
-            body:Body = self._read_line__colon_block()
-            return MatchCase(token, exp, body)
+            body, last_token = self._read_line__colon_block()
+            return MatchCase(token, last_token, exp, body)
         else:
+            # Assignment
             exps:list[Expr] = []
             while True:
                 exps.append(self._read_expr())
@@ -285,7 +295,8 @@ class Parser:
                     self._assert_check_assignable(target)
                     value:Expr = self._read_expr()
                     renamed_token:Token = token.name_as(op_str)
-                    op:Expr = Op(token, renamed_token, target, value)
+                    op:Expr = Op(token, get_last_token(value), renamed_token,
+                                 target, value)
                     return Assign([target], op)
                 else:
                     # x
@@ -319,10 +330,12 @@ class Parser:
                 return None
         self.throw("Invalid assignment target", exp)
 
-    def _read_line__colon_block(self) -> Body:
+    def _read_line__colon_block(self) -> tuple[Body,Token]:
+        block_start_token:Token = self.tokeniser.peek()
         self._assert_read(BLOCK_START, f'Expected "{BLOCK_START}" here')
+        next_token:Token = self.tokeniser.peek()
         if (not USING_COLON) and self._try_read(BLOCK_END):
-            return []
+            return [], next_token
         with self.tokeniser.freeze_indentation.inverse:
             if self._try_read("\n") or (not USING_COLON):
                 block:Body = self._read_block(indented=True)
@@ -330,7 +343,7 @@ class Parser:
                 block:Body = self._read_line()
         if BLOCK_END:
             self._assert_read(BLOCK_END, f'Expected "{BLOCK_END}" here')
-        return block
+        return block, block_start_token
 
     # Read expr
     def _read_expr(self, precedence:int=0, notype:bool=False,
@@ -348,18 +361,18 @@ class Parser:
             elif operators == ["if_else_expr"]:
                 assert not istype, f"{operators} is only for non-types"
                 return self._read_expr_if_else(precedence, notype=notype)
-            elif operators == ["func_call", "idx"]:
+            elif operators == ["func_call", "idx", "."]:
                 assert not istype, f"{operators} is only for non-types"
-                return self._read_expr_call_idx(precedence, notype=notype)
+                return self._read_expr_call_idx_dot(precedence, notype=notype)
             elif operators == ["literal"]:
                 assert not istype, f"{operators} is only for non-types"
                 return self._read_expr_literal(notype=notype)
             elif operators == ["identifier"]:
                 assert istype, f"{operators} is only for types"
                 return self._read_identifier()
-            elif operators == ["idx"]:
+            elif operators == ["idx", "."]:
                 assert istype, f"{operators} is only for types"
-                return self._read_type_idx(precedence)
+                return self._read_type_simple_idx_dot(precedence)
             raise NotImplementedError(f"special {operators=!r} not implemented")
         if assoc == "<_":
             op:Token = self.tokeniser.peek()
@@ -367,7 +380,7 @@ class Parser:
                 self._assert_read(op.token)
                 exp:Expr = self._read_expr(precedence, notype=notype,
                                            istype=istype)
-                return Op(op, op, exp)
+                return Op(op, get_last_token(exp), op, exp)
             else:
                 return self._read_expr(precedence+1, notype=notype,
                                        istype=istype)
@@ -379,7 +392,7 @@ class Parser:
                 if op not in operators:
                     break
                 self._assert_read(op.token)
-                exp:Expr = Op(get_first_token(exp), op, exp)
+                exp:Expr = Op(get_first_token(exp), op, op, exp)
             return exp
         elif assoc == "_<_":
             exp:Exp = self._read_expr(precedence+1, notype=notype, istype=istype)
@@ -387,29 +400,39 @@ class Parser:
                 op:Token = self.tokeniser.peek()
                 if op not in operators:
                     break
+                # Special case for partial functions /1 + ?/
+                # The second "/" shouldn't match the "/" in EXPR_PRECEDENCE
+                if (op == "/") and (self.tokeniser.peek_n(2)[1] in NOT_EXPR):
+                    break
                 self._assert_read(op.token)
                 exp2:Expr = self._read_expr(precedence+1, notype=notype,
                                             istype=istype)
-                exp:Expr = Op(get_first_token(exp), op, exp, exp2)
+                exp:Expr = Op(get_first_token(exp), get_last_token(exp2), op,
+                              exp, exp2)
             return exp
         raise NotImplementedError(f"{assoc=!r} not implemented/didn't return")
 
     def _read_type(self) -> Expr:
         return self._read_expr(1, notype=True, istype=True)
 
-    def _read_type_idx(self, precedence:int) -> Expr:
+    def _read_type_simple_idx_dot(self, precedence:int) -> Expr:
         exp:Expr = self._read_expr(precedence+1, istype=True)
         while True:
             token:Token = self.tokeniser.peek()
-            if not self._try_read("["):
-                break
-            idx:Expr = self._read_expr(istype=True)
-            self._assert_read("]", "expected ] or comma")
-            if self._is_tuple(idx):
-                args:list[Expr] = idx.args
+            if self._try_read("["):
+                idx:Expr = self._read_expr(istype=True)
+                last_token:Token = self.tokeniser.peek()
+                self._assert_read("]", "expected ] or comma")
+                if self._is_tuple(idx):
+                    args:list[Expr] = idx.args
+                else:
+                    args:list[Expr] = [idx]
+                exp:Expr = Op(token, last_token, token.name_as("idx"), *args)
+            elif self._try_read("."):
+                identifier:Var = self._read_identifier()
+                exp:Expr = Op(token, identifier, token, exp, identifier)
             else:
-                args:list[Expr] = [idx]
-            exp:Expr = Op(token, token.name_as("idx"), *args)
+                break
         return exp
 
     def _read_expr_basic_list(self, precedence:int=0, *, notype:bool,
@@ -427,7 +450,8 @@ class Parser:
                                         istype=istype))
             if not self._try_read(","):
                 break
-        return Op(comma_token, comma_token.name_as("·,·"), *args)
+        return Op(comma_token, get_last_token(args[-1]),
+                  comma_token.name_as("·,·"), *args)
 
     def _read_expr_if_else(self, precedence:int, *, notype:bool) -> Expr:
         exp:Expr = self._read_expr(precedence+1, notype=notype)
@@ -435,12 +459,13 @@ class Parser:
         if self._try_read("if"):
             cond:Expr = self._read_expr(notype=notype)
             self._assert_read("else", "Missing else clause for if expr")
-            return Op(get_first_token(exp), token, cond, exp,
-                      self._read_expr(notype=notype))
+            else_exp:Expr = self._read_expr(notype=notype)
+            return Op(get_first_token(exp), get_last_token(else_exp), token,
+                      cond, exp, else_exp)
         else:
             return exp
 
-    def _read_expr_call_idx(self, precedence:int, *, notype:bool) -> Expr:
+    def _read_expr_call_idx_dot(self, precedence:int, *, notype:bool) -> Expr:
         token:Token = self.tokeniser.peek()
         ismacro:bool = self._try_read("$")
         exp:Expr = self._read_expr(precedence+1, notype=notype)
@@ -466,33 +491,36 @@ class Parser:
                         if self._try_read(":"):
                             if self.tokeniser.peek() != "]":
                                 step:Expr = self._read_expr(notype=True)
-                    exp:Expr = Op(get_first_token(exp), op.name_as("idx"), exp,
-                                  start, stop, step)
+                    next_token:Token = self.tokeniser.peek()
+                    exp:Expr = Op(get_first_token(exp), next_token,
+                                  op.name_as("idx"), exp, start, stop, step)
                 else:
-                    exp:Expr = Op(get_first_token(exp), \
-                                  op.name_as("simple_idx"), exp,
-                                  start)
+                    next_token:Token = self.tokeniser.peek()
+                    exp:Expr = Op(get_first_token(exp), next_token,
+                                  op.name_as("simple_idx"), exp, start)
                 self._assert_read("]", "Expected ] character")
             elif op == "(":
                 if ismacro:
                     ismacro:bool = False
                     _type:str = "$call"
                     if not isinstance(exp, Var):
-                        self.tokeniser.throw("Macros only exist at " \
-                                             "compile time", token)
+                        token.throw("Macros only exist at compile time")
                 else:
                     _type:str = "call"
-                args = self._read_expr__expr_list(*"()",
-                                                  self._read_func_call_arg)
-                exp:Expr = Op(get_first_token(exp), op.name_as(_type), exp,
+                args, lt = self._read_expr__expr_list(*"()",
+                                                      self._read_func_call_arg)
+                exp:Expr = Op(get_first_token(exp), lt, op.name_as(_type), exp,
                               *args)
                 if self._try_read(":"):
                     exp.type:Expr = self._read_type()
+            elif self._try_read("."):
+                identifier:Var = self._read_identifier()
+                exp:Expr = Op(get_first_token(exp), get_last_token(identifier),
+                              op, exp, identifier)
             else:
                 break
         if ismacro:
-            self.tokeniser.throw("Macros only exist at compile time",
-                                 token)
+            token.throw("Macros only exist at compile time")
         return exp
 
     def _read_expr_literal(self, *, notype:bool) -> Expr:
@@ -514,12 +542,25 @@ class Parser:
         # identifier
         elif token.isidentifier():
             exp:Expr = self._read_identifier()
+        # \<partial function>\
+        elif token == "/":
+            self._assert_read("/")
+            exp:Expr = self._read_expr()
+            last_token:Token = self.tokeniser.peek()
+            self._assert_read("/", "expected / after expression")
+            args:list[Var] = []
+            exp:Expr = _replace_partial_qs_exp(exp, args)
+            _reset_q_next_num()
+            ret:ReturnYield = ReturnYield(token, exp, isreturn=True)
+            exp:Func = Func(token, last_token, args, [ret], None,
+                            functional=False)
         # (5,10) or (5+5)
         elif token == "(":
             with self.tokeniser.freeze_indentation:
                 self._assert_read("(")
+                next_token:Token = self.tokeniser.peek()
                 if self.tokeniser.peek() == ")":
-                    exp:Expr = Op(token, token.name_as("·,·"))
+                    exp:Expr = Op(token, next_token, token.name_as("·,·"))
                 else:
                     exp:Expr = self._read_expr()
                 self._assert_read(")", "Expected ) or comma")
@@ -527,21 +568,24 @@ class Parser:
         elif token == "[":
             with self.tokeniser.freeze_indentation:
                 self._assert_read("[")
-                if self.tokeniser.peek() == "]":
-                    exp:Expr = Op(token, token.name_as("[]"))
+                next_token:Token = self.tokeniser.peek()
+                if next_token == "]":
+                    exp:Expr = Op(token, next_token, token.name_as("[]"))
                 else:
                     exp:Expr = self._read_expr()
                     if self._is_tuple(exp):
                         array:list[Expr] = exp.args
                     else:
                         array:list[Expr] = [exp]
-                    exp:Expr = Op(token, token.name_as("[]"), *array)
+                    next_token:Token = self.tokeniser.peek()
+                    exp:Expr = Op(token, next_token, token.name_as("[]"),
+                                  *array)
                 self._assert_read("]", "Expected ] or comma")
         # dict/set
         elif token == "{":
             exp:Expr = self._read_expr__set_dict()
         else:
-            self.tokeniser.throw(f"Unexpected {token=!r}", token)
+            token.throw(f"Unexpected {token=!r}")
 
         if not notype:
             if self._try_read(":"):
@@ -558,11 +602,15 @@ class Parser:
     def _read_identifier(self) -> Var:
         token:Token = self.tokeniser.peek()
         if not token.isidentifier():
-            self.tokeniser.throw("expected identifier", token)
+            token.throw("expected identifier")
         self._assert_read(token.token)
         if token in KEYWORDS:
-            self.tokeniser.throw(f"{token=!r} in KEYWORDS but parsed as " \
-                                 f"identifier")
+            token.throw(f"{token!r} in KEYWORDS but parsed as identifier")
+        return Var(token)
+
+    def _read_qmarked(self, token:Token) -> Var:
+        assert token.isqmarked(), "InternalError"
+        self._assert_read(token.token)
         return Var(token)
 
     def _read_class_record_def(self) -> Expr:
@@ -571,7 +619,7 @@ class Parser:
         if class_token == "record":
             functional:bool = True
         elif class_token != "class":
-            self.tokeniser.throw("InternalError", class_token)
+            class_token.throw("InternalError")
 
         token:Token = self.tokeniser.peek()
         bases:list[Expr] = []
@@ -582,12 +630,12 @@ class Parser:
             else:
                 bases:list[Expr] = [raw_bases]
 
-        body:list[Cmd] = self._read_line__colon_block()
-        for cmd in body:
-            if not isinstance(cmd, Assign):
-                self.throw("Expected assignment", cmd)
+        body, last_token = self._read_line__colon_block()
+        # for cmd in body:
+        #     if not isinstance(cmd, Assign):
+        #         self.throw("Expected assignment", cmd)
 
-        return Class(class_token, bases, body, functional)
+        return Class(class_token, last_token, bases, body, functional)
 
     def _read_func_proc_def(self) -> Expr:
         token:Token = self.tokeniser.read()
@@ -596,12 +644,13 @@ class Parser:
         if token == "func":
             functional:bool = True
         elif token != "proc":
-            self.tokeniser.throw("InternalError", token)
-        args = self._read_expr__expr_list(*"()", self._read_func_proc_def_arg)
+            token.throw("InternalError")
+        args, _ = self._read_expr__expr_list(*"()",
+                                              self._read_func_proc_def_arg)
         if self._try_read(":"):
             ret_type:Expr = self._read_type()
-        body:Body = self._read_line__colon_block()
-        return Func(token, args, body, ret_type, functional)
+        body, last_token = self._read_line__colon_block()
+        return Func(token, last_token, args, body, ret_type, functional)
 
     def _read_func_proc_def_arg(self, prev:list[Var]) -> Var:
         err_token:Token = self.tokeniser.peek()
@@ -613,13 +662,11 @@ class Parser:
             var.default:Expr = self._read_expr()
         else:
             for _ in filter(lambda x: not isinstance(x, Var), prev):
-                self.tokeniser.throw("non-default argument follows " \
-                                     "default argument", err_token)
+                err_token.throw("non-default argument follows default argument")
         for arg in prev:
             arg:Token = (arg if isinstance(arg, Var) else arg.target).identifier
             if arg == curr_arg:
-                self.tokeniser.throw("duplicate identifier in func definition",
-                                     err_token)
+                err_token.throw("duplicate identifier in func definition")
         return var
 
     def _read_func_call_arg(self, prev:list[Expr|Var]) -> Expr|Var:
@@ -628,8 +675,8 @@ class Parser:
         if self._try_read("="):
             value:Expr = self._read_expr(1) # don't read commas
             if not isinstance(exp, Var):
-                self.tokeniser.throw("expression cannot contain assignment, " \
-                                     'perhaps you meant "=="', err_token)
+                err_token.throw("expression cannot contain assignment, " \
+                                'perhaps you meant "=="')
             assert isinstance(exp, Var), "Impossible"
             exp.default:Expr = value
         else:
@@ -639,8 +686,7 @@ class Parser:
                 assert isinstance(p, Var), "Impossible"
                 if p.default is None:
                     continue
-                self.tokeniser.throw("non-default argument follows " \
-                                     "default argument", err_token)
+                err_token.throw("non-default argument follows default argument")
         return exp
 
     def _read_expr__set_dict(self) -> Op:
@@ -658,9 +704,9 @@ class Parser:
             return DictPair(exp, exp2)
 
         start_token:Token = self.tokeniser.peek()
-        args = self._read_expr__expr_list(*"{}", read_func)
+        args, last_token = self._read_expr__expr_list(*"{}", read_func)
         _type:str = "{:}" if is_dict else "{,}"
-        return Op(start_token, start_token.name_as(_type), *args)
+        return Op(start_token, last_token, start_token.name_as(_type), *args)
 
     def _read_expr__expr_list(self, start:str, end:str,
                               read_func) -> list[object]:
@@ -675,8 +721,140 @@ class Parser:
                 if self.tokeniser.peek() != ",":
                     break
                 self._assert_read(",")
+            end_token:Token = self.tokeniser.peek()
             self._assert_read(end, f"Expected {end} or comma")
-        return args
+        return args, end_token
+
+
+def simplify(body:Body, is_func:bool=False) -> Body:
+    # Unused expr removal
+    i:int = -1
+    while i+1 < len(body)-is_func:
+        i += 1
+        cmd:Cmd = body[i]
+        if isinstance(cmd, Class):
+            simplify(cmd.body)
+        elif isinstance(cmd, Expr):
+            if not is_func:
+                if not (isinstance(cmd, Literal) and cmd.literal.isstring()):
+                    continue
+            if isinstance(cmd, Op) and cmd.op == "call":
+                continue
+            body.pop(i)
+            i -= 1
+        elif isinstance(cmd, Assign):
+            if isinstance(cmd.value, Class|Func):
+                simplify(cmd.value.body, is_func=isinstance(cmd.value, Func))
+
+
+def assert_partials(body:Body) -> Body:
+    for cmd in body:
+        if isinstance(cmd, Assign):
+            for target in cmd.targets:
+                _assert_partials_exp(target)
+            cmd.value:Expr = _assert_partials_exp(cmd.value)
+        elif isinstance(cmd, If):
+            _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.true)
+            assert_partials(cmd.false)
+        elif isinstance(cmd, While):
+            _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.true)
+        elif isinstance(cmd, For):
+            _assert_partials_exp(cmd.identifier)
+            _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.body)
+            assert_partials(cmd.nobreak)
+        elif isinstance(cmd, With):
+            if cmd.identifier is not None:
+                _assert_partials_exp(cmd.identifier)
+            if cmd.exp is not None:
+                _assert_partials_exp(cmd.exp)
+            assert_partials(cmd.code)
+            assert_partials(cmd.fin)
+            assert_partials(cmd.noerror)
+            for vars, assignable, cmds in cmd.catch:
+                if assignable is not None:
+                    _assert_partials_exp(assignable)
+                assert_partials(cmds)
+                for var in vars:
+                    token:Token = var.identifier
+                    if token.token.startswith("?"):
+                        token.throw("?var outside of match/case statement")
+        elif isinstance(cmd, ReturnYield|Raise):
+            if cmd.exp is not None:
+                cmd.exp:Expr = _assert_partials_exp(cmd.exp)
+        elif isinstance(cmd, NonLocal|BreakContinue):
+            pass
+        elif isinstance(cmd, MatchCase):
+            cmd.ft.throw("match case outside of match statement")
+        elif isinstance(cmd, Match):
+            for case in cmd.cases:
+                assert_partials(case.body)
+                _assert_partials_exp(case.exp, allow_qs=True)
+        elif isinstance(cmd, Expr):
+            _assert_partials_exp(cmd)
+        else:
+            raise NotImplementedError("TODO: Missed a case here")
+
+def _assert_partials_exp(exp:Expr, allow_qs:bool=False) -> None:
+    if isinstance(exp, Func):
+        for arg in exp.args:
+            _assert_partials_exp(arg)
+        assert_partials(exp.body)
+    elif isinstance(exp, DictPair):
+        exp.exp1:Expr = _assert_partials_exp(exp.exp1, allow_qs=allow_qs)
+        exp.exp2:Expr = _assert_partials_exp(exp.exp2, allow_qs=allow_qs)
+    elif isinstance(exp, Class):
+        for base in exp.bases:
+            _assert_partials_exp(base)
+        assert_partials(exp.body)
+    elif isinstance(exp, Var):
+        token:Token = exp.identifier
+        if token == "?":
+            token.throw("? outside of partial functions is forbidden")
+        if token.token.startswith("?") and (not allow_qs):
+            token.throw("?car outside of match/case statements is forbidden")
+    elif isinstance(exp, Literal):
+        pass
+    elif isinstance(exp, Op):
+        for i, arg in enumerate(exp.args):
+            exp.args[i] = _assert_partials_exp(arg, allow_qs=allow_qs)
+    else:
+        raise NotImplementedError("TODO: Missed a case here")
+    return exp
+
+def _replace_partial_qs_exp(exp:Expr, args:list[Var]) -> Expr:
+    if isinstance(exp, Func):
+        _replace_partial_qs(exp.body, args)
+    elif isinstance(exp, DictPair):
+        exp.exp1:Expr = _replace_partial_qs(exp.exp1, args)
+        exp.exp2:Expr = _replace_partial_qs(exp.exp2, args)
+    elif isinstance(exp, Class):
+        _replace_partial_qs(exp.body)
+    elif isinstance(exp, Var):
+        token:Token = exp.identifier
+        if token == "?":
+            new_name:str = f"£{_get_q_next_num()}"
+            exp.identifier:Token = token.name_as(new_name)
+            args.append(exp)
+    elif isinstance(exp, Literal):
+        pass
+    elif isinstance(exp, Op):
+        for i, arg in enumerate(exp.args):
+            exp.args[i] = _replace_partial_qs_exp(arg, args)
+    else:
+        raise NotImplementedError("TODO: Missed a case here")
+    return exp
+
+_q_num:int = 0
+def _get_q_next_num() -> int:
+    global _q_num
+    current, _q_num = _q_num, _q_num+1
+    return current
+def _reset_q_next_num() -> None:
+    global _q_num
+    _q_num = 0
 
 
 EXPR_PRECEDENCE = [
@@ -695,15 +873,13 @@ EXPR_PRECEDENCE = [
                     [False, "<_",   ["-", "~"]],
                     # [False, "<_",   ["++", "--"]], # name clashes with x++
                     # [False, "_<",   ["++", "--"]],
-                    [True,  "",     ["func_call", "idx"]], # left assoc
-                    [False, "_<_",  ["."]],
+                    [True,  "",     ["func_call", "idx", "."]], # left assoc
                     [True,  "",     ["literal"]],
                   ]
 TYPE_PRECEDENCE = [
                     [True,  "",     ["·,·"]],
                     [False, "_<_",  ["|"]],
-                    [True,  "",     ["idx"]], # left assoc
-                    [False, "_<_",  ["."]],
+                    [True,  "",     ["idx", "."]], # left assoc
                     [True,  "",     ["identifier"]],
                   ]
 MOD_ASSIGN_OPERATORS = []

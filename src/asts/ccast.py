@@ -25,19 +25,21 @@ class DictPair(Expr):
 
 
 class Func(Expr):
-    __slots__ = "ft", "args", "body", "ret_type", "functional"
+    __slots__ = "ft", "lt", "args", "body", "ret_type", "functional"
 
-    def __init__(self, ft:Token, args:list[Var], body:Body, ret_type:Expr|None,
-                 functional:bool) -> Func:
+    def __init__(self, ft:Token, lt:Token, args:list[Var], body:Body,
+                 ret_type:Expr|None, functional:bool) -> Func:
         assert isinstance(ret_type, Expr|None), "TypeError"
         assert isinstance(functional, bool), "TypeError"
         assert islist(body, Cmd|Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         assert islist(args, Var), "TypeError"
         self.ret_type:Expr|None = ret_type
         self.args:list[Var] = args
         self.body:Body = body
         self.ft:Token = ft
+        self.lt:Token = lt
         super().__init__()
 
     def __repr__(self) -> str:
@@ -45,21 +47,23 @@ class Func(Expr):
 
 
 class Class(Expr):
-    __slots__ = "ft", "attributes", "bases", "functional"
+    __slots__ = "ft", "lt", "body", "bases", "functional"
 
-    def __init__(self, ft:Token, bases:list[Expr], attributes:list[Assign],
+    def __init__(self, ft:Token, lt:Token, bases:list[Expr], body:Body,
                  functional:bool) -> Class:
         assert isinstance(functional, bool), "TypeError"
-        assert islist(attributes, Assign), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         assert islist(bases, Expr), "TypeError"
-        self.attributes:list[Assign] = attributes
+        assert islist(body, Cmd), "TypeError"
         self.bases:list[Expr] = bases
+        self.body:Body = body
         self.ft:Token = ft
+        self.lt:Token = lt
         super().__init__()
 
     def __repr__(self) -> str:
-        return f"Class({repr(self.bases)[1:-1]}){self.attributes}"
+        return f"Class({repr(self.bases)[1:-1]}){self.body}"
 
 
 class Assign:
@@ -107,14 +111,16 @@ class Literal(Expr):
 
 
 class Op(Expr):
-    __slots__ = "ft", "op", "args"
+    __slots__ = "ft", "lt", "op", "args"
 
-    def __init__(self, ft:Token, op:Token, *args:tuple[Expr]) -> Op:
+    def __init__(self, ft:Token, lt:Token, op:Token, *args:tuple[Expr]) -> Op:
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         assert isinstance(op, Token), "TypeError"
         assert islist(args, Expr), "TypeError"
         self.args:list[Expr] = list(args)
         self.ft:Token = ft
+        self.lt:Token = lt
         self.op:Token = op
         super().__init__()
 
@@ -124,63 +130,72 @@ Assignable:type = Op|Var
 
 
 class If:
-    __slots__ = "ft", "exp", "true", "false"
+    __slots__ = "ft", "lt", "exp", "true", "false"
 
-    def __init__(self, ft:Token, exp:Expr, true:Body, false:Body) -> If:
+    def __init__(self, ft:Token, lt:Token, exp:Expr, true:Body,
+                 false:Body) -> If:
         assert islist(false, Cmd|Expr), "TypeError"
         assert islist(true, Cmd|Expr), "TypeError"
         assert isinstance(exp, Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         self.false:Body = false
         self.true:Body = true
         self.exp:Expr = exp
         self.ft:Token = ft
+        self.lt:Token = lt
 
     def __repr__(self) -> str:
         return f"If({self.exp!r}){self.true}{self.false}"
 
 
 class While:
-    __slots__ = "ft", "exp", "true"
+    __slots__ = "ft", "lt", "exp", "true"
 
-    def __init__(self, ft:Token, exp:Expr, true:Body) -> While:
+    def __init__(self, ft:Token, lt:Token, exp:Expr, true:Body) -> While:
         assert islist(true, Cmd|Expr), "TypeError"
         assert isinstance(exp, Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         self.true:Body = true
         self.exp:Expr = exp
         self.ft:Token = ft
+        self.lt:Token = lt
 
     def __repr__(self) -> str:
         return f"While({self.exp!r}){self.true}"
 
 
 class For:
-    __slots__ = "ft", "identifier", "exp", "body", "nobreak"
+    __slots__ = "ft", "lt", "identifier", "exp", "body", "nobreak"
 
-    def __init__(self, ft:Token, identifier:Assignable, exp:Expr, body:Body,
-                 nobreak:Body) -> For:
+    def __init__(self, ft:Token, lt:Token, identifier:Assignable, exp:Expr,
+                 body:Body, nobreak:Body) -> For:
         assert isinstance(identifier, Assignable), "TypeError"
         assert islist(nobreak, Cmd|Expr), "TypeError"
         assert islist(body, Cmd|Expr), "TypeError"
         assert isinstance(exp, Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
-        self.identifier:Token = identifier
+        assert isinstance(lt, Token), "TypeError"
+        self.identifier:Assignable = identifier
         self.nobreak:Body = nobreak
         self.body:Body = body
         self.exp:Expr = exp
         self.ft:Token = ft
+        self.lt:Token = lt
 
     def __repr__(self) -> str:
         return f"For({self.identifier} in {self.exp!r}){self.body}"
 
 
 class With:
-    __slots__ = "ft", "identifier", "exp", "code", "catch", "fin", "noerror"
+    __slots__ = "ft", "lt", "identifier", "exp", "code", "catch", "fin", \
+                "noerror"
 
-    def __init__(self, ft:Token, identifier:Assignable|None, exp:Expr|None,
-                 code:Body, catch:list[tuple[list[Var],Assignable|None,Body]],
-                 fin:Body, noerror:Body) -> With:
+    def __init__(self, ft:Token, lt:Token, identifier:Assignable|None,
+                 exp:Expr|None, code:Body,
+                 catch:list[tuple[list[Var],Assignable|None,Body]], fin:Body,
+                 noerror:Body) -> With:
         """
         with exp? as identifier?:
             <code>
@@ -198,6 +213,7 @@ class With:
         assert islist(code, Cmd|Expr), "TypeError"
         assert islist(fin, Cmd|Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         if exp is None:
             assert identifier is None, "ValueErrpr"
         for t in catch:
@@ -215,6 +231,7 @@ class With:
         self.code:Body = code
         self.fin:Body = fin
         self.ft:Token = ft
+        self.lt:Token = lt
 
     def __repr__(self) -> str:
         return f"With({self.identifier} = {self.exp!r}){self.code}" \
@@ -249,6 +266,7 @@ class Raise:
     def __init__(self, ft:Token, exp:Expr|None) -> Raise:
         assert isinstance(exp, Expr|None), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         self.exp:Expr|None = exp
         self.ft:Token = ft
 
@@ -259,15 +277,17 @@ class Raise:
 
 
 class BreakContinue:
-    __slots__ = "ft", "n", "isbreak"
+    __slots__ = "ft", "lt", "n", "isbreak"
 
-    def __init__(self, ft:Token, n:int, isbreak:bool) -> BreakContinue:
+    def __init__(self, ft:Token, lt:Token, n:int, isbreak:bool):
         assert isinstance(isbreak, bool), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         assert isinstance(n, int), "TypeError"
         assert n >= 1, "ValueError"
         self.isbreak:bool = isbreak
         self.ft:Token = ft
+        self.lt:Token = lt
         self.n:int = n
 
     def __repr__(self) -> str:
@@ -278,32 +298,37 @@ class BreakContinue:
 
 
 class MatchCase:
-    __slots__ = "ft", "exp", "body"
+    __slots__ = "ft", "lt", "exp", "body"
 
-    def __init__(self, ft:Token, exp:Expr, body:Body) -> MatchCase:
+    def __init__(self, ft:Token, lt:Token, exp:Expr, body:Body) -> MatchCase:
         assert islist(body, Cmd|Expr), "TypeError"
         assert isinstance(exp, Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         self.body:Body = body
         self.exp:Expr = exp
         self.ft:Token = ft
+        self.lt:Token = lt
 
     def __repr__(self) -> str:
         return f"Case[{self.exp}=>{self.body}]"
 
 
 class Match:
-    __slots__ = "ft", "exp", "cases"
+    __slots__ = "ft", "lt", "exp", "cases"
 
-    def __init__(self, ft:Token, exp:Expr, cases:list[MatchCase]) -> Match:
+    def __init__(self, ft:Token, lt:Token, exp:Expr,
+                 cases:list[MatchCase]) -> Match:
         assert isinstance(cases, list), "TypeError"
         assert isinstance(exp, Expr), "TypeError"
         assert isinstance(ft, Token), "TypeError"
+        assert isinstance(lt, Token), "TypeError"
         for c in cases:
             assert isinstance(c, MatchCase), "TypeError"
         self.cases:list[MatchCase] = cases
         self.exp:Expr = exp
         self.ft:Token = ft
+        self.lt:Token = lt
 
     def __repr__(self) -> str:
         return f"Match({self.exp}){self.cases}"
@@ -352,18 +377,30 @@ def get_first_token(node:Cmd|Expr|MatchCase) -> Token:
         return node.ft
     raise NotImplemented("TODO")
 
-def raise_error_token(msg:str, token:Token, error:Exception) -> None:
-    assert isinstance(error, Exception), "TypeError"
-    assert isinstance(token, Token), "TypeError"
-    assert isinstance(msg, str), "TypeError"
-    try:
-        token.stamp.throw(msg)
-    except SyntaxError as err:
-        error.msg:str = err.msg
-        raise error
+def get_last_token(node:Cmd|Expr|MatchCase) -> Token:
+    assert isinstance(node, Cmd|Expr|MatchCase), "TypeError"
+    if isinstance(node, DictPair):
+        return get_last_token(node.exp2)
+    elif isinstance(node, Assign):
+        return get_last_token(node.value)
+    elif isinstance(node, Var):
+        return node.identifier
+    elif isinstance(node, Literal):
+        return node.literal
+    elif isinstance(node, Raise|ReturnYield):
+        if node.exp is None:
+            return node.ft
+        else:
+            return get_last_token(node.exp)
+    elif isinstance(node, NonLocal):
+        return node.identifiers[-1]
+    elif isinstance(node, Func|Class|Op|If|While|For|With| \
+                          BreakContinue|MatchCase|Match):
+        return node.lt
+    raise NotImplemented("TODO")
 
 
 Macro:type = Func
-Cmd:type = Expr|Assign|If|While|For|ReturnYield|BreakContinue|Raise|NonLocal| \
-           Match|With
+Branch:type = If|While|For|Match|With
+Cmd:type = Expr|Assign|Branch|ReturnYield|BreakContinue|Raise|NonLocal|Macro
 Body:type = list[Cmd]

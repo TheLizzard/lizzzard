@@ -1,5 +1,6 @@
 from __future__ import annotations
 from enum import Enum, auto
+from io import StringIO
 
 
 DEBUG_THROW:bool = False
@@ -29,6 +30,11 @@ class Token:
 
     def name_as(self, token:str) -> Token:
         return Token(token, self.stamp, self.type)
+
+    @property
+    def size(self) -> int:
+        # TODO: account for str prefix and """?
+        return len(self.token) + self.isstring()
 
     def __eq__(self, other:str|Token) -> bool:
         if isinstance(other, str):
@@ -62,6 +68,12 @@ class Token:
         else:
             return self.token
 
+    def throw(self, msg:str) -> None:
+        self.stamp.throw(msg)
+
+    def double_throw(self, msg1:str, msg2:str, other:Token) -> None:
+        self.stamp.double_throw(msg1, msg2, other.stamp)
+
 
 class Stamp:
     __slots__ = "line", "char", "line_string"
@@ -75,29 +87,45 @@ class Stamp:
         self.line:int = line
 
     def throw(self, msg:str) -> None:
-        new_msg:str = msg + f" on line {self.line} character {self.char}\n"
-        new_msg += self.line_string
-        new_msg += " "*self.char + "^"
+        self._throw(self._get_err_msg(msg))
+
+    def double_throw(self, msg1:str, msg2:str, other:Stamp) -> None:
+        new_msg:str = self._get_err_msg(msg1)
+        new_msg += "\n" + other._get_err_msg(msg2)
+        self._throw(new_msg)
+
+    def _get_err_msg(self, msg:str) -> str:
+        msg += f" [line {self.line} character {self.char}]\n"
+        msg += self.line_string
+        msg += " "*self.char + "^"
+        return msg
+
+    def _throw(self, msg:str) -> None:
         if DEBUG_THROW:
-            raise SyntaxError(new_msg)
+            raise SyntaxError(msg)
         else:
-            raise FinishedWithError(new_msg) from None
+            raise FinishedWithError(msg) from None
 
 
 class FinishedWithError(SyntaxError): ...
 
 
 class PreLexer:
-    __slots__ = "under", "buffer", "ran_out", "line", "char", "line_string"
+    __slots__ = "under", "buffer", "ran_out", "line", "char", "line_string", \
+                "all"
 
     def __init__(self, buffer:TextIOBase) -> PreLexer:
         self.under:TextIOBase = buffer
+        self.all:StringIO = StringIO()
         self.ran_out:bool = False
         self.line_string:str = ""
         self.buffer:str = ""
         self.line:int = 1
         self.char:int = 0
         self.peek(1)
+
+    def get_all_text(self) -> str:
+        return self.all.getvalue()
 
     def __bool__(self) -> bool:
         return (not self.ran_out) or bool(self.buffer)
@@ -118,6 +146,7 @@ class PreLexer:
         if (len(self.buffer) < size) and (not self.ran_out):
             while True:
                 char:str = self.under.read(1)
+                self.all.write(char)
                 self.buffer += char
                 if char == "\n":
                     break
@@ -210,17 +239,21 @@ class Tokeniser:
         self.ran_out:bool = False
         self.read_newline_into_buffer(first=True)
 
+    def get_all_text(self) -> str:
+        return self.under.get_all_text()
+
     def _throw(self, msg:str, stamp:Stamp=None) -> None:
         stamp:Stamp = stamp or self.under.stamp()
         assert isinstance(stamp, Stamp), "TypeError"
         assert isinstance(msg, str), "TypeError"
         self.under.throw(msg, stamp=stamp)
 
-    def throw(self, msg:str, token:Token=None) -> None:
-        assert isinstance(token, Token|None), "TypeError"
-        assert isinstance(msg, str), "TypeError"
-        stamp:Stamp = self.under.stamp() if (token is None) else token.stamp
-        self._throw(msg, stamp=stamp)
+    # Depricated
+    # def throw(self, msg:str, token:Token=None) -> None:
+    #     assert isinstance(token, Token|None), "TypeError"
+    #     assert isinstance(msg, str), "TypeError"
+    #     stamp:Stamp = self.under.stamp() if (token is None) else token.stamp
+    #     self._throw(msg, stamp=stamp)
 
     def __bool__(self) -> bool:
         return (not self.ran_out) or bool(self.buffer)
@@ -292,7 +325,7 @@ class Tokeniser:
                    [Token("\n", stamp, TokenType.OTHER)]
         elif token in "\t ":
             assert self.under.read(1) == token, "Never fails"
-        elif token.isidentifier():
+        elif token.isidentifier() or (not token.isascii()):
             ident:Token = self.read_identifier()
             if self.under.peek(1) in ("'", '"'):
                 ret:Token = self.read_string(ident.token, type_stamp=stamp)
@@ -301,7 +334,8 @@ class Tokeniser:
         elif token == "?":
             q_mark:Stamp = self.under.stamp()
             self.under.read(1)
-            if self.under.peek(1).isidentifier():
+            next_token:str = self.under.peek(1)
+            if next_token.isidentifier() or (not next_token.isascii()):
                 ident:Token = self.read_identifier()
                 ret:Token = Token("?"+ident.token, q_mark, TokenType.IDENTIFIER)
             else:
@@ -322,12 +356,16 @@ class Tokeniser:
         elif token in "$:[](){},;":
             self.under.read(1)
             ret:Token = Token(token, stamp, TokenType.OTHER)
-        elif token in "+-*^%|<>=":
+        elif token in "+-*^%|<>=&":
             self.under.read(1)
             if (token == "-") and (self.under.peek(1) == ">"):
                 token += self.under.read(1)
             else:
                 if (token == "*") and (self.under.peek(1) == "*"): # **
+                    token += self.under.read(1)
+                elif (token == ">") and (self.under.peek(1) == ">"): # >>
+                    token += self.under.read(1)
+                elif (token == "<") and (self.under.peek(1) == "<"): # <<
                     token += self.under.read(1)
                 if (token in "-+") and (self.under.peek(1) == token): # ++ --
                     token += self.under.read(1)
@@ -391,10 +429,12 @@ class Tokeniser:
         stamp:Stamp = self.under.stamp()
         while True:
             token += self.under.read(1)
-            ntoken:str = token + self.under.peek(1)
-            if not ntoken.isidentifier():
+            char:str = self.under.peek(1)
+            if not char:
                 break
-            if token == ntoken:
+            ntoken:str = token + char
+            if (not ntoken.isidentifier()) and char.isascii() and \
+               (not ("0" <= char <= "9")):
                 break
         return Token(token, stamp, TokenType.IDENTIFIER)
 

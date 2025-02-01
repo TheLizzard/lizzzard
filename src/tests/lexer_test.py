@@ -33,7 +33,11 @@ FULL_TESTS = (
                 (r"5 ** 10", ("5", "**", "10")),
                 ("x\n\t#c", "x"),
                 ("x\n\t#c\ny", "x\ny"),
-                ("...", ["..."])
+                ("...", ["..."]),
+                ("⊥()", ["⊥", "(", ")"]),
+                ("⊥0()", ["⊥0", "(", ")"]),
+                ("·1()", ["·1", "(", ")"]),
+                ("Δ9()", ["Δ9", "(", ")"]),
              )
 
 
@@ -52,6 +56,7 @@ if __name__ == "__main__":
             assert t.read() == exp, f"Test error in {code!r}"
         for i in range(10):
             assert t.read() == "\n", "Should be empty"
+    print("\x1b[92m[TEST]: All tests passed\x1b[0m")
 
 
 """
@@ -63,9 +68,9 @@ a\n b\n c\n d
 t:Tokeniser = Tokeniser(StringIO(code))
 # print(repr("".join(map(repr, t.read(len(expected))))), repr(expected),
 #       sep="\n")
-for i in range(10):
+for i in range(15):
     tok = t.read()
-    print([tok, t.indentation, bool(t), t.buffer, t.under.peek(999)])
+    print([tok, tok.type, t.indentation, bool(t), t.buffer, t.under.peek(999)])
 
 
 # """
