@@ -172,13 +172,13 @@ class State:
 
     # Env helpers
     def _merge_branch(self, branch:Branch, other:State) -> None:
+        self.not_env |= other.not_env
         if self.must_ret or self.must_end_loop:
-            self.not_env:EnvReason = other.not_env
-            self.env:Env = other.env
+            self.env:Env = self._add_lists(self.env, other.env)
             return
         if other.must_ret or other.must_end_loop:
+            self.env:Env = self._add_lists(self.env, other.env)
             return
-        self.not_env |= other.not_env
         for name in other.env:
             if name in self.env:
                 # TODO: merge self.env[name] with other.env[name]
@@ -1124,20 +1124,44 @@ while (i < 100_000_000) {
 """[1:-1], False
 
     TEST10 = """
-a = b = 1
 A = class {
-    nonlocal b
-    x = a
-    b = x+1
-    y = func() {
-        nonlocal b
-        b
+    __init__ = func(this, x) {
+        this.x = x
+    }
+    add = func(this, other) {
+        if (not other.x) {
+            return A(this.x)
+        } else {
+            new = this.add(A(other.x - 1))
+            new.x += 1
+            return new
+        }
     }
 }
 
-io.print(A)
-io.print(A.x==1, b==2)
-io.print(A.y, A.y()==2)
+a = A(0).add(A(1_000_000))
+io.print("wrapped++", a.x)
+"""[1:-1], False
+
+    TEST11 = """
+A = class {
+    __init__ = func(this, x) {
+        this.x = x
+    }
+}
+
+a = A(0)
+while (a.x < 10_000_000) {
+    a = A(a.x+1)
+}
+io.print("obj_creat++", a.x)
+"""[1:-1], False
+
+    TEST12 = """
+while (true) {
+    x = 1+1
+    x = 0
+}
 """[1:-1], False
 
     from os.path import join, dirname, abspath

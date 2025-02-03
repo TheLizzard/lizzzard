@@ -180,3 +180,6 @@ src/frontend/log/*
 src/code-examples/raytracer/*
 src/code-examples/*.ppm
 src/code-examples/pypy*
+
+# My files
+run.run

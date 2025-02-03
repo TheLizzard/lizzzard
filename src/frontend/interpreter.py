@@ -366,7 +366,7 @@ if USE_JIT:
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
     virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
     jitdriver = JitDriver(greens=["CLEAR_AFTER_USE","frame_size","pc","bytecode","teleports","SOURCE_CODE"],
-                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","mros","global_scope"],
+                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","mros","global_scope","no_loop"],
                           virtualizables=virtualizables, get_printable_location=get_location)
 
 
@@ -506,11 +506,12 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
     func = FuncValue(0, [], 0, 0, u"main-scope", None)
     global_scope = hint(env, promote=True)
     frame_size = const(frame_size)
+    no_loop = hint([False]*len(bytecode), promote=True)
 
     while pc < len(bytecode):
         if USE_JIT:
             jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
-                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
             debug(str(bytecode_debug_str(pc, bt)), 3)
@@ -610,6 +611,8 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                         master = func.masters[len(func.masters)-bt_literal.link]
                     tp = teleports[bt_literal.tp_label]
                     assert isinstance(tp, IntValue), "InternalError"
+                    if bt_literal.name == CONSTRUCTOR_NAME:
+                        no_loop[tp.value] = True
                     literal = FuncValue(tp.value, func.masters+[master], bt_literal.env_size, bt_literal.nargs, bt_literal.name, None)
                 elif bt.type == BLiteral.STR_T:
                     assert isinstance(bt_literal, BLiteralStr), "TypeError"
@@ -663,7 +666,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                     assert isinstance(bytecode[pc], Bable), "InternalError"
                     if USE_JIT and (pc < old_pc): # Tell the JIT about the jump
                         jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
-                                                attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+                                                attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
 
             elif isinstance(bt, BRegMove):
                 env_store(env, bt.reg1, env_load(env, bt.reg2))
@@ -671,6 +674,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
             elif isinstance(bt, BRet):
                 old_pc = pc
                 value = env_load(env, bt.reg)
+                enter_jit = ENTER_JIT_FUNC_RET and (not no_loop[func.tp])
                 env_store(env, bt.reg, None, chk=False)
                 if not stack:
                     if not isinstance(value, IntValue):
@@ -683,25 +687,28 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                     env, func, pc, ret_reg = stack.env, stack.func, stack.pc, stack.ret_reg
                     stack = stack.prev_stack
                 env_store(env, const(ret_reg), value)
-                if USE_JIT and ENTER_JIT_FUNC_RET: # Tell the JIT about the jump
+                if USE_JIT and enter_jit: # Tell the JIT about the jump
                     jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
-                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
-                func = hint(func, promote=True)
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
+                # hurts perfornce: func = hint(func, promote=True)
 
             elif isinstance(bt, BCall):
                 args = []
+                enter_jit = True
                 _func = env_load(env, bt.regs[1])
-                _func = hint(_func, promote=True)
+                # hurts perfornce: _func = hint(_func, promote=True)
                 if isinstance(_func, ObjectValue) and (_func.type&1 == 0):
                     self = ObjectValue(_func.type+1, _func.name)
-                    while len(mros) <= self.type: mros.append([])
-                    mros[self.type] = hint(mros[_func.type], promote=True)
+                    while const(len(mros)) <= self.type: mros.append([])
+                    if const(len(mros[self.type])) == 0:
+                        mros[self.type] = mros[_func.type]
                     args = [self]
                     _func = const(_func.attr_vals[CONSTRUCTOR_IDX])
                     if _func is None:
                         # Default constructor
                         env_store(env, bt.regs[0], self)
                         continue
+                    enter_jit = False
                     if not isinstance(_func, FuncValue):
                         raise_type_error(u"constructor should be a function not " + get_type(_func))
                 elif isinstance(_func, FuncValue):
@@ -710,9 +717,9 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                 else:
                     raise_type_error(get_type(_func) + u" is not callable")
 
-                tp_value = _func.tp
+                tp_value = const(_func.tp)
                 if tp_value < len(bytecode):
-                    func = const(func) # No idea why I need this :/
+                    # hurts perfornce: func = const(func) # No idea why I need this :/ (me 5h later: it's hurting performance)
                     # Create a new stack frame
                     if STACK_IS_LIST:
                         stack.append((env, func, pc, bt.regs[0]))
@@ -734,7 +741,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                         env_store(env, i+2, args[i])
                     for i in range(2, len(bt.regs)):
                         env_store(env, i+len(args), env_load(old_env, bt.regs[i]))
-                    enter_jit = ENTER_JIT_FUNC_CALL
+                    enter_jit = enter_jit and ENTER_JIT_FUNC_CALL
                 else: # Built-ins
                     op_idx = tp_value - len(bytecode)
                     pure_op = bool(_func.env_size)
@@ -756,7 +763,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                     env_store(old_env, reg, None, chk=False)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
                     jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
-                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
 
             elif isinstance(bt, BLoadLink) or isinstance(bt, BStoreLoadDict) or isinstance(bt, BDotDict):
                 raise_unreachable_error(u"ENV_IS_LIST==false is not longer supported so this bytecode instruction is illegal")
