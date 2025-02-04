@@ -537,14 +537,15 @@ class ByteCoder:
                 # Condition
                 reg:int = self._convert(cmd.args[0], state)
                 state.append_bast(BJump(op_to_err(cmd), label_true.id, reg,
-                                        False))
+                                        False, clear=[reg]))
                 res_reg:int = state.get_free_reg()
                 state.mark_as_free_reg(reg)
                 # If-false
                 tmp_reg:int = self._convert(cmd.args[2], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
                 state.free_reg(tmp_reg)
-                state.append_bast(BJump(EMPTY_ERR, label_end.id, 1, False))
+                state.append_bast(BJump(EMPTY_ERR, label_end.id, 1, False,
+                                        clear=[]))
                 # If-true
                 state.append_bast(label_true)
                 state.mark_as_free_reg(reg)
@@ -571,7 +572,7 @@ class ByteCoder:
                 tmp_reg:int = self._convert(cmd.args[0], state)
                 state.append_bast(BRegMove(res_reg, tmp_reg))
                 state.append_bast(BJump(op_to_err(cmd), label_or.id, tmp_reg,
-                                        negate_if))
+                                        negate_if, [tmp_reg]))
                 state.mark_as_free_reg(tmp_reg)
                 # Arg 2
                 tmp_reg:int = self._convert(cmd.args[1], state)
@@ -612,13 +613,15 @@ class ByteCoder:
             label_true:Bable = Bable("if_true_"+str(if_id))
             label_end:Bable = Bable("if_end_"+str(if_id))
             reg:int = self._convert(cmd.exp, state)
-            state.append_bast(BJump(op_to_err(cmd), label_true.id, reg, False))
+            state.append_bast(BJump(op_to_err(cmd), label_true.id, reg, False,
+                                    [reg]))
             state.mark_as_free_reg(reg)
             other_state:State = state.copy_for_branch()
             for subcmd in cmd.false:
                 tmp_reg:int = self._convert(subcmd, state)
                 state.free_reg(tmp_reg)
-            state.append_bast(BJump(op_to_err(cmd), label_end.id, 1, False))
+            state.append_bast(BJump(op_to_err(cmd), label_end.id, 1, False,
+                                    clear=[]))
             state.append_bast(label_true)
             state.mark_as_free_reg(reg)
             for subcmd in cmd.true:
@@ -640,7 +643,8 @@ class ByteCoder:
             label_end:Bable = Bable(f"while_{while_id}_end")
             state.append_bast(label_start)
             reg:int = self._convert(cmd.exp, state)
-            state.append_bast(BJump(op_to_err(cmd), label_end.id, reg, True))
+            state.append_bast(BJump(op_to_err(cmd), label_end.id, reg, True,
+                                    [reg]))
             state.mark_as_free_reg(reg)
             state.loop_labels.append((label_start.id, label_end.id))
             other_state:State = state.copy_for_branch()
@@ -648,7 +652,8 @@ class ByteCoder:
                 tmp_reg:int = self._convert(subcmd, other_state)
                 other_state.free_reg(tmp_reg)
             state.loop_labels.pop()
-            state.append_bast(BJump(EMPTY_ERR, label_start.id, 1, False))
+            state.append_bast(BJump(EMPTY_ERR, label_start.id, 1, False,
+                                    clear=[]))
             state.append_bast(label_end)
             state.mark_as_free_reg(reg)
             state.merge_branch(cmd, other_state)
@@ -751,7 +756,8 @@ class ByteCoder:
                 cmd.ft.throw(msg)
             start_label, end_label = state.loop_labels[-cmd.n]
             label:str = end_label if cmd.isbreak else start_label
-            state.append_bast(BJump(EMPTY_ERR, label, 1, False))
+            state.append_bast(BJump(EMPTY_ERR, label, 1, False,
+                                    clear=[]))
             state.must_end_loop:bool = True # Must be at the end
 
         elif isinstance(cmd, Class):
@@ -1013,11 +1019,14 @@ fib = func(x) ->
     return fib(x-2) + fib(x-1)
 io.print(fib(15), "should be", 1597)
 io.print(fib(30), "should be", 2178309)
-io.print("cpython takes 0.221 sec")
+io.print(fib(36), "should be", 39088169)
+io.print("cpython takes 3.474 sec")
+io.print("pypy takes 0.187 sec")
+io.print("lizzzard takes 0.833 sec")
 """[1:-1], True
 
     TEST3 = """
-max = 10_000
+max = 100_000
 primes = [2]
 i = 2
 while (i < max){
@@ -1033,17 +1042,21 @@ while (i < max){
     primes.append(i)
 }
 io.print("the number of primes bellow", max, "is:", primes.len(),
-         "which should be", 1229)
-io.print("the last prime is:", primes[-1], "which should be", 9973)
-io.print("cpython takes 0.373 sec")
+         "which should be", 9592)
+io.print("the last prime is:", primes[-1], "which should be", 99991)
+io.print("cpython takes 61.300 sec")
+io.print("pypy takes 1.689 sec")
+io.print("lizzzard takes 1.728 sec")
 """[1:-1], False
 
     TEST4 = """
 i = 0
-while i < 10_000_000 ->
+while i < 100_000_000 ->
     i += 1
 io.print("while++", i)
-io.print("cpython takes 0.233 sec")
+io.print("cpython takes 6.320 sec")
+io.print("pypy takes 0.092 sec")
+io.print("lizzzard takes 0.234 sec")
 """[1:-1], True
 
     TEST5 = """
@@ -1054,7 +1067,9 @@ f = func(x) {
     return x
 }
 io.print("rec++", f(1_000_000))
-io.print("cpython takes 0.201 sec")
+io.print("cpython takes 0.177 sec")
+io.print("pypy seg faults")
+io.print("lizzzard takes 0.309 sec")
 """[1:-1], False
 
     TEST6 = """
@@ -1062,11 +1077,13 @@ A = class {
     A = B = 0
 }
 A.X = 1
-while (A.X < 10_000_000) {
+while (A.X < 100_000_000) {
     A.X += 1
 }
 io.print("attr++", A.X)
-io.print("cpython takes 1.120 sec")
+io.print("cpython takes 13.463 sec")
+io.print("pypy takes 0.113 sec")
+io.print("lizzzard takes 0.231 sec")
 """[1:-1], False
 
     TEST7 = """
@@ -1144,24 +1161,28 @@ io.print("wrapped++", a.x)
 """[1:-1], False
 
     TEST11 = """
-A = class {
+WrappedInt = class {
     __init__ = func(this, x) {
         this.x = x
     }
+    add = func(this, other) { WrappedInt(this.x+other.x) }
 }
 
-a = A(0)
+ONE = WrappedInt(1)
+a = WrappedInt(0)
 while (a.x < 10_000_000) {
-    a = A(a.x+1)
+    a = a.add(ONE)
 }
 io.print("obj_creat++", a.x)
 """[1:-1], False
 
     TEST12 = """
-while (true) {
-    x = 1+1
-    x = 0
-}
+io.print("######## Is instance #########")
+A = class {}
+a = A()
+io.print(5, "\t", isinstance(a, A), not isinstance(a, int),
+                  isinstance(1, float), not isinstance(1, A),
+                  isinstance("a", str))
 """[1:-1], False
 
     from os.path import join, dirname, abspath

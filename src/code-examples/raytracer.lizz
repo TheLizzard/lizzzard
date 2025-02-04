@@ -698,3 +698,7 @@ PIXEL_SAMPLES = 1
 LENS_SAMPLES = 1
 
 main()
+
+io.print("cpython takes 28.832 sec")
+io.print("pypy takes 29.988 sec")
+io.print("lizzzard takes 11.716 sec")

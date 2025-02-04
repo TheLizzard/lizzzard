@@ -43,13 +43,11 @@ class FloatValue(Value):
         self.value = value
 
 class FuncValue(Value):
-    _immutable_fields_ = ["tp", "masters", "env_size", "nargs", "name", "bound_obj"]
-    __slots__ = "tp", "masters", "env_size", "nargs", "name", "bound_obj"
+    _immutable_fields_ = ["tp", "masters", "env_size", "nargs", "name"]
+    __slots__ = "tp", "masters", "env_size", "nargs", "name"
     @unroll_safe
     @look_inside
-    def __init__(self, tp, masters, env_size, nargs, name, bound_obj):
-        if bound_obj is not None:
-            assert isinstance(bound_obj, Value), "TypeError"
+    def __init__(self, tp, masters, env_size, nargs, name):
         assert isinstance(masters, list), "TypeError"
         for master in masters:
             assert isinstance(master, ENV_TYPE), "TypeError"
@@ -57,12 +55,21 @@ class FuncValue(Value):
         assert isinstance(nargs, int), "TypeError"
         assert isinstance(name, str), "TypeError"
         assert isinstance(tp, int), "TypeError"
-        self.bound_obj = bound_obj
         self.env_size = env_size
         self.masters = masters
         self.nargs = nargs
         self.name = name
         self.tp = tp
+
+class BoundFuncValue(Value):
+    _immutable_fields_ = ["func", "bound_obj"]
+    __slots__ = "func", "bound_obj"
+    @look_inside
+    def __init__(self, func, bound_obj):
+        assert isinstance(bound_obj, Value), "TypeError"
+        assert isinstance(func, FuncValue), "TypeError"
+        self.bound_obj = bound_obj
+        self.func = func
 
 class SpecialValue(Value):
     _immutable_fields_ = ["type", "str_value", "int_value"]
@@ -273,12 +280,6 @@ def teleports_get(teleports, label):
     return result
 
 @look_inside
-def copy_and_bind_func(func, obj):
-    assert isinstance(func, FuncValue), "TypeError"
-    assert isinstance(obj, Value), "TypeError"
-    return FuncValue(func.tp, func.masters, func.env_size, func.nargs, func.name, obj)
-
-@look_inside
 def _c3_merge(mros):
     # Stolen from: https://stackoverflow.com/a/54261655/11106801
     if len(mros) == 0:
@@ -361,11 +362,17 @@ else:
     ENV_TYPE = list
 
 if USE_JIT:
-    def get_location(_, __, pc, bytecode, *___):
+    def get_location(_, pc, bytecode, *__):
+        # Got a rpython type union error. Took me 20min to figure out why so I am adding type checks here for future me
+        assert isinstance(bytecode, list), "TypeError"
+        assert isinstance(pc, int), "TypeError"
+        for bt in bytecode:
+            assert isinstance(bt, Bast), "TypeError"
+        assert 0 <= pc < len(bytecode), "ValueError"
         return bytecode_debug_str(pc, bytecode[pc])
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
     virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
-    jitdriver = JitDriver(greens=["CLEAR_AFTER_USE","frame_size","pc","bytecode","teleports","SOURCE_CODE"],
+    jitdriver = JitDriver(greens=["frame_size","pc","bytecode","teleports","SOURCE_CODE"],
                           reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","mros","global_scope","no_loop"],
                           virtualizables=virtualizables, get_printable_location=get_location)
 
@@ -487,15 +494,14 @@ def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE):
     for i, op in enumerate(BUILTINS):
         assert isinstance(op, str), "TypeError"
         pure_op = op not in BUILTIN_MODULE_SIDES
-        env[i+frame_size] = FuncValue(i+len(bytecode), envs, pure_op, 0, op, None)
+        env[i+frame_size] = FuncValue(i+len(bytecode), envs, pure_op, 0, op)
     for i, op in enumerate(BUILTIN_MODULES):
         assert isinstance(op, str), "TypeError"
         env[i+frame_size+len(MODULE_ATTRS)] = SpecialValue(u"module", str_value=op)
     # Start actual interpreter
-    return _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size)
+    return _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size)
 
-def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
-    CLEAR_AFTER_USE = const(flags.is_set("CLEAR_AFTER_USE"))
+def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
     SOURCE_CODE = const_str(SOURCE_CODE)
     pc = 0 # current instruction being executed
     stack = [] if STACK_IS_LIST else None
@@ -503,14 +509,14 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
     attr_matrix = hint([], promote=True)
     lens = hint([], promote=True)
     mros = hint([], promote=True)
-    func = FuncValue(0, [], 0, 0, u"main-scope", None)
+    func = FuncValue(0, [], 0, 0, u"main-scope")
     global_scope = hint(env, promote=True)
     frame_size = const(frame_size)
     no_loop = hint([False]*len(bytecode), promote=True)
 
     while pc < len(bytecode):
         if USE_JIT:
-            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
                                       attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
@@ -526,6 +532,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                 if bt.link == 0:
                     scope = env
                 else:
+                    func = const(func)
                     idx = len(func.masters)-bt.link
                     if idx == 0:
                         scope = global_scope
@@ -544,15 +551,16 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX, APPEND_IDX):
                         raise_name_error(u"Unknown attribute")
-                    env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
+                    env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, StrValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX,):
                         raise_name_error(u"Unknown attribute")
-                    env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
+                    env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, SpecialValue):
-                    if obj.type == u"module":
+                    obj_type = const_str(obj.type)
+                    if obj_type == u"module":
                         value = None
                         if obj.str_value == u"io":
                             if bt.attr not in (PRINT_IDX, OPEN_IDX):
@@ -570,10 +578,10 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                         else:
                             raise_name_error(u"this")
                         env_store(env, bt.reg, value)
-                    elif obj.type == u"file":
+                    elif obj_type == u"file":
                         if bt.attr not in (READ_IDX, WRITE_IDX, CLOSE_IDX):
                             raise_name_error(u"this")
-                        env_store(env, bt.reg, copy_and_bind_func(global_scope[bt.attr+frame_size], obj))
+                        env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                     else:
                         raise_unreachable_error(u"TODO . operator on SpecialValue with obj.type=" + obj.type)
                 elif isinstance(obj, ObjectValue):
@@ -586,12 +594,13 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                         attr_vals_store(cls.attr_vals, attr_idx, env_load(env, bt.reg))
                     else:
                         value = attr_vals_load(cls.attr_vals, attr_idx)
-                        if isinstance(value, FuncValue) and (obj.type&1) and (value.bound_obj is None):
-                            value = copy_and_bind_func(value, obj)
-                            _, attr_idx = attr_matrix[obj.type][bt.attr]
+                        obj_type = const(obj.type)
+                        if isinstance(value, FuncValue) and (obj_type&1):
+                            value = BoundFuncValue(value, obj)
+                            _, attr_idx = attr_matrix[obj_type][bt.attr]
                             if attr_idx == -1:
-                                attr_idx, lens[obj.type] = lens[obj.type], lens[obj.type]+1
-                                attr_matrix[obj.type][bt.attr] = (True, attr_idx)
+                                attr_idx, lens[obj_type] = lens[obj_type], lens[obj_type]+1
+                                attr_matrix[obj_type][bt.attr] = (True, attr_idx)
                             attr_vals_extend_until_len(obj.attr_vals, attr_idx+1)
                             attr_vals_store(obj.attr_vals, attr_idx, value)
                         env_store(env, bt.reg, value)
@@ -613,7 +622,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                     assert isinstance(tp, IntValue), "InternalError"
                     if bt_literal.name == CONSTRUCTOR_NAME:
                         no_loop[tp.value] = True
-                    literal = FuncValue(tp.value, func.masters+[master], bt_literal.env_size, bt_literal.nargs, bt_literal.name, None)
+                    literal = FuncValue(tp.value, func.masters+[master], bt_literal.env_size, bt_literal.nargs, bt_literal.name)
                 elif bt.type == BLiteral.STR_T:
                     assert isinstance(bt_literal, BLiteralStr), "TypeError"
                     literal = StrValue(bt_literal.value)
@@ -653,8 +662,10 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
 
             elif isinstance(bt, BJump):
                 value = env_load(env, bt.condition_reg)
-                if CLEAR_AFTER_USE and (bt.condition_reg > 1):
-                    env_store(env, bt.condition_reg, None, chk=False)
+                # Clear the regs in bt.clear
+                for reg in bt.clear:
+                    if reg > 1:
+                        env_store(env, reg, None, chk=False)
                 if value is None:
                     raise_unreachable_error(u"undefined should never be in regs")
                 condition = force_bool(value)
@@ -665,7 +676,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                     old_pc, pc = pc, tp.value
                     assert isinstance(bytecode[pc], Bable), "InternalError"
                     if USE_JIT and (pc < old_pc): # Tell the JIT about the jump
-                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
                                                 attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
 
             elif isinstance(bt, BRegMove):
@@ -674,7 +685,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
             elif isinstance(bt, BRet):
                 old_pc = pc
                 value = env_load(env, bt.reg)
-                enter_jit = ENTER_JIT_FUNC_RET and (not no_loop[func.tp])
+                enter_jit = ENTER_JIT_FUNC_RET and (not no_loop[const(func.tp)])
                 env_store(env, bt.reg, None, chk=False)
                 if not stack:
                     if not isinstance(value, IntValue):
@@ -688,45 +699,50 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                     stack = stack.prev_stack
                 env_store(env, const(ret_reg), value)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
-                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
                                             attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
-                # hurts perfornce: func = hint(func, promote=True)
+                func = hint(func, promote=True)
 
             elif isinstance(bt, BCall):
                 args = []
                 enter_jit = True
                 _func = env_load(env, bt.regs[1])
-                # hurts perfornce: _func = hint(_func, promote=True)
-                if isinstance(_func, ObjectValue) and (_func.type&1 == 0):
-                    self = ObjectValue(_func.type+1, _func.name)
-                    while const(len(mros)) <= self.type: mros.append([])
-                    if const(len(mros[self.type])) == 0:
-                        mros[self.type] = mros[_func.type]
-                    args = [self]
-                    _func = const(_func.attr_vals[CONSTRUCTOR_IDX])
-                    if _func is None:
-                        # Default constructor
-                        env_store(env, bt.regs[0], self)
-                        continue
-                    enter_jit = False
-                    if not isinstance(_func, FuncValue):
-                        raise_type_error(u"constructor should be a function not " + get_type(_func))
+                if isinstance(_func, BoundFuncValue):
+                    args.append(_func.bound_obj)
+                    _func = _func.func
                 elif isinstance(_func, FuncValue):
-                    if _func.bound_obj is not None:
-                        args.append(_func.bound_obj)
+                    pass
+                elif isinstance(_func, ObjectValue):
+                    _func_type = const(_func.type)
+                    if (_func_type&1) == 0:
+                        # Create new object and call constructor
+                        self = ObjectValue(_func_type+1, _func.name)
+                        while const(len(mros)) <= self.type: mros.append([])
+                        if const(len(mros[self.type])) == 0:
+                            mros[self.type] = mros[_func_type]
+                        args = [self]
+                        _func = const(_func.attr_vals[CONSTRUCTOR_IDX])
+                        if _func is None:
+                            # Default constructor
+                            env_store(env, bt.regs[0], self)
+                            continue
+                        enter_jit = False
+                        if not isinstance(_func, FuncValue):
+                            raise_type_error(u"constructor should be a function not " + get_type(_func))
+                    else:
+                        raise_type_error(inner_repr(_func) + u" is not callable")
                 else:
                     raise_type_error(get_type(_func) + u" is not callable")
 
-                tp_value = const(_func.tp)
-                if tp_value < len(bytecode):
-                    # hurts perfornce: func = const(func) # No idea why I need this :/ (me 5h later: it's hurting performance)
+                _func = const(_func)
+                if _func.tp < len(bytecode):
                     # Create a new stack frame
                     if STACK_IS_LIST:
                         stack.append((env, func, pc, bt.regs[0]))
                     else:
                         stack = StackFrame(env, func, pc, bt.regs[0], stack)
                     # Set the pc/env/func
-                    func, old_pc, pc, old_env = _func, pc, tp_value, env
+                    func, old_pc, pc, old_env = _func, pc, _func.tp, env
                     if ENV_IS_VIRTUALISABLE:
                         env = VirtualisableArray(func.env_size+frame_size)
                     else:
@@ -743,7 +759,7 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                         env_store(env, i+len(args), env_load(old_env, bt.regs[i]))
                     enter_jit = enter_jit and ENTER_JIT_FUNC_CALL
                 else: # Built-ins
-                    op_idx = tp_value - len(bytecode)
+                    op_idx = _func.tp - len(bytecode)
                     pure_op = bool(_func.env_size)
                     op = BUILTINS[op_idx]
                     args += [env_load(env, bt.regs[i]) for i in range(2,len(bt.regs))]
@@ -760,9 +776,10 @@ def _interpret(bytecode, teleports, env, attrs, flags, SOURCE_CODE, frame_size):
                     enter_jit, old_env = False, env
                 # Clear the regs in bt.clear
                 for reg in bt.clear:
-                    env_store(old_env, reg, None, chk=False)
+                    if reg > 1:
+                        env_store(old_env, reg, None, chk=False)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
-                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, CLEAR_AFTER_USE=CLEAR_AFTER_USE, frame_size=frame_size,
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
                                             attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
 
             elif isinstance(bt, BLoadLink) or isinstance(bt, BStoreLoadDict) or isinstance(bt, BDotDict):
@@ -824,13 +841,15 @@ def inner_isinstance(mros, global_scope, frame_size, args):
     elif isinstance(cls, ObjectValue):
         if not isinstance(instance, ObjectValue):
             return FALSE
-        if cls.type == instance.type:
+        cls_type, instance_type = const(cls.type), const(instance.type)
+        if cls_type == instance_type:
             return TRUE
-        for super_cls in hint(mros[const(cls.type)], promote=True):
-            if super_cls.type == instance.type:
+        for super_cls in hint(mros[const(cls_type)], promote=True):
+            super_cls_type = const(super_cls.type)
+            if super_cls_type == instance_type:
                 return TRUE
-            if instance.type&1:
-                if super_cls.type == instance.type-1:
+            if instance_type&1:
+                if super_cls_type == instance_type-1:
                     return TRUE
         return FALSE
     elif isinstance(cls, ListValue):
@@ -1389,14 +1408,15 @@ def inner_repr(obj):
     elif isinstance(obj, StrValue):
         return obj.value
     elif isinstance(obj, FuncValue):
+        return u"Func<" + obj.name + u">"
+    elif isinstance(obj, BoundFuncValue):
         string = u"Func<"
         bound_obj = obj.bound_obj
-        if bound_obj is not None:
-            if isinstance(bound_obj, ObjectValue):
-                string += bound_obj.name + u"."
-            else:
-                string += get_type(bound_obj) + u"<object>."
-        string += obj.name + u">"
+        if isinstance(bound_obj, ObjectValue):
+            string += bound_obj.name + u"."
+        else:
+            string += get_type(bound_obj) + u"<object>."
+        string += obj.func.name + u">"
         return string
     elif isinstance(obj, ListValue):
         string = u"["

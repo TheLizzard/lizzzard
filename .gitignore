@@ -182,4 +182,6 @@ src/code-examples/*.ppm
 src/code-examples/pypy*
 
 # My files
-run.run
+log/clear_log.run
+log/pypy.run
+log/run.run

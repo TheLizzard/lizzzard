@@ -441,17 +441,21 @@ class BLiteral(Bast):
 
 
 class BJump(Bast):
-    ### WARNING: BJump clears condition_reg no mater what!!!
-    _immutable_fields_ = ["err", "label", "negated", "condition_reg"]
+    _immutable_fields_ = ["err", "label", "negated", "condition_reg", "clear"]
     AST_T_ID = free_ast_t_id()
-    __slots__ = "err", "label", "negated", "condition_reg"
+    __slots__ = "err", "label", "negated", "condition_reg", "clear"
 
-    def __init__(self, err, label, condition_reg, negated):
+    def __init__(self, err, label, condition_reg, negated, clear):
         assert isinstance(err, ErrorIdx), "TypeError"
         assert isinstance(condition_reg, int), "TypeError"
         assert isinstance(negated, bool), "TypeError"
         assert isinstance(label, str), "TypeError"
+        assert isinstance(clear, list), "TypeError"
+        for reg in clear:
+            assert isinstance(reg, int), "TypeError"
+            assert 0 <= reg < MAX_REG_VALUE, "ValueError"
         assert 0 <= condition_reg < MAX_REG_VALUE, "ValueError"
+        self.clear = [const(reg) for reg in clear]
         self.condition_reg = const(condition_reg)
         self.negated = const(negated)
         self.label = const_str(label)
@@ -462,6 +466,7 @@ class BJump(Bast):
                serialise_str(self.label, NAME_SIZE) + \
                serialise_int(self.negated, 1) + \
                serialise_int(self.condition_reg, REG_SIZE) + \
+               serialise_list_int(self.clear, ARG_SIZE_SIZE, REG_SIZE) + \
                self.err.serialise()
 
     def derialise(data):
@@ -469,9 +474,10 @@ class BJump(Bast):
         label, data = derialise_str(data, NAME_SIZE)
         negated, data = derialise_int(data, REG_SIZE)
         condition_reg, data = derialise_int(data, REG_SIZE)
+        clear, data = derialise_list_int(data, ARG_SIZE_SIZE, REG_SIZE)
         err, data = ErrorIdx.derialise(data)
         assert 0 <= negated <= 1, "ValueError"
-        return BJump(err, label, condition_reg, bool(negated)), data
+        return BJump(err, label, condition_reg, bool(negated), clear), data
 
 
 class BRegMove(Bast):
@@ -653,7 +659,7 @@ def bytecode_list_to_str(bytecodes, mini=False):
             output += tab + reg_to_str(bt.regs[0]) + u":=" + \
                       reg_to_str(bt.regs[1]) + u"(" + \
                       u",".join([reg_to_str(i) for i in bt.regs[2:]]) + \
-                      u")[clear=" + \
+                      u") clear=[" + \
                       u",".join([reg_to_str(i) for i in bt.clear]) + u"]"
         elif isinstance(bt, BStoreLoadDict):
             if bt.storing:
@@ -709,7 +715,9 @@ def bytecode_list_to_str(bytecodes, mini=False):
             output += tab + reg_to_str(bt.reg) + u":=" + literal
         elif isinstance(bt, BJump):
             output += tab + u"jumpif(" + (u"!" if bt.negated else u"") + \
-                      reg_to_str(bt.condition_reg) + u")=>" + bt.label
+                      reg_to_str(bt.condition_reg) + u")=>" + bt.label + \
+                      u" clear=[" + \
+                      u",".join([reg_to_str(i) for i in bt.clear]) + u"]"
         elif isinstance(bt, BRegMove):
             output += tab + reg_to_str(bt.reg1) + u":=" + reg_to_str(bt.reg2)
         elif isinstance(bt, BRet):
