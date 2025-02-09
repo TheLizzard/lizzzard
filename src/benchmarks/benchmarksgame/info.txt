@@ -1,0 +1,11 @@
+https://en.wikipedia.org/wiki/The_Computer_Language_Benchmarks_Game
+    > The Computer Language Benchmarks Game (formerly called The Great Computer
+    >   Language Shootout) is a free software project for comparing how a given
+    >   subset of simple algorithms can be implemented in various popular
+    >   programming languages.
+
+Python3:
+    https://benchmarksgame-team.pages.debian.net/benchmarksgame/measurements/python3.html
+
+Mirror:
+    https://github.com/Byron/benchmarksgame-cvs-mirror

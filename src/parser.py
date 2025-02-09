@@ -450,7 +450,7 @@ class Parser:
                                         istype=istype))
             if not self._try_read(","):
                 break
-        return Op(comma_token, get_last_token(args[-1]),
+        return Op(get_first_token(exp), get_last_token(args[-1]),
                   comma_token.name_as("·,·"), *args)
 
     def _read_expr_if_else(self, precedence:int, *, notype:bool) -> Expr:

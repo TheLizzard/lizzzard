@@ -1,0 +1,141 @@
+# https://benchmarksgame-team.pages.debian.net/benchmarksgame/program/fasta-python3-1.html
+# transpiled into lizzzard by TheLizzard
+
+# The Computer Language Benchmarks Game
+# https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+#
+# modified by Ian Osgood
+# modified again by Heinrich Acker
+# modified by Justin Peel
+# 2to3
+
+
+min = func(a, b) { a if a<b else b }
+
+zip = func(indexable_1, indexable_2) {
+    length = min(indexable_1.len(), indexable_2.len())
+    output = []
+    idx = 0
+    while (idx < length) {
+        output.append([indexable_1[idx], indexable_2[idx]])
+        idx += 1
+    }
+    return output
+}
+
+""""
+zip = func(indexable_1, indexable_2) {
+    if (indexable_1.len() == 0) {
+        return []
+    } else if (indexable_2.len() == 0) {
+        return []
+    } else {
+        return ([indexable_1[0],indexable_2[0]] +
+                zip(indexable_1[1:], indexable_2[1:]))
+    }
+}
+"""
+
+alu = (
+   "GGCCGGGCGCGGTGGCTCACGCCTGTAATCCCAGCACTTTGG" +
+   "GAGGCCGAGGCGGGCGGATCACCTGAGGTCAGGAGTTCGAGA" +
+   "CCAGCCTGGCCAACATGGTGAAACCCCGTCTCTACTAAAAAT" +
+   "ACAAAAATTAGCCGGGCGTGGTGGCGCGCGCCTGTAATCCCA" +
+   "GCTACTCGGGAGGCTGAGGCAGGAGAATCGCTTGAACCCGGG" +
+   "AGGCGGAGGTTGCAGTGAGCCGAGATCGCGCCACTGCACTCC" +
+   "AGCCTGGGCGACAGAGCGAGACTCCGTCTCAAAAA")
+
+iub = zip("acgtBDHKMNRSVWY", [0.27, 0.12, 0.12, 0.27] + [0.02]*11)
+
+homosapiens = [
+    ["a", 0.3029549426680],
+    ["c", 0.1979883004921],
+    ["g", 0.1975473066391],
+    ["t", 0.3015094502008],
+]
+
+
+gen_random = func() {
+    ia = 3877
+    ic = 29573
+    im = 139968
+    seed = 42
+    return func() {
+        nonlocal seed
+        seed = (seed * ia + ic) % im
+        return seed / im
+    }
+}
+random = gen_random()
+
+range = func(max, callback) {
+    i = 0
+    while (i < max) {
+        callback(i)
+        i += 1
+    }
+}
+
+
+make_cumulative = func(table) {
+    p = []
+    c = []
+    prob = 0.0
+    range(table.len(), (func(idx) {
+        nonlocal prob
+        prob += table[idx][1]
+        p.append(prob)
+        c.append(table[idx][0])
+    }))
+    return [p, c]
+}
+
+random_fasta = func(table, n) {
+    bisect = func(array, x) {
+        lo = 0
+        hi = array.len()
+        while (lo < hi) {
+            mid = (lo + hi) // 2
+            if (x < array[mid]) {
+                hi = mid
+            } else {
+                lo = mid + 1
+            }
+        }
+        return lo
+    }
+
+    get_line = func(size) {
+        x = []
+        i = 0
+        while (i < size) {
+            x.append(chars[bisect(probs, random())])
+            i += 1
+        }
+        return "".join(x)
+    }
+
+    width = 60
+    probs, chars = make_cumulative(table)
+    range(n//width, (func(idx) {
+        x = get_line(width)
+        if (idx % 1000 == 0) {
+            io.print(x)
+        }
+    }))
+    if (n % width) {
+        io.print(get_line(n%width))
+    }
+}
+
+main = func() {
+    n = int(cmd_args[0])
+
+    io.print(">TWO IUB ambiguity codes")
+    random_fasta(iub, n*3)
+
+    io.print(">THREE Homo sapiens frequency")
+    random_fasta(homosapiens, n*5)
+}
+
+main()

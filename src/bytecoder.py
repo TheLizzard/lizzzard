@@ -2,8 +2,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from functools import reduce
 from operator import iconcat
+from sys import stderr, argv
 from io import StringIO
-from sys import stderr
 import traceback
 
 from frontend.bcast import *
@@ -447,6 +447,57 @@ class ByteCoder:
             if reg > 1:
                 state.free_reg(reg)
 
+    def _convert_assign(self, state:State, target:Assignable, reg:int) -> None:
+        if isinstance(target, Var):
+            token:Token = target.identifier
+            state.write_env(token)
+            state.append_bast(BStoreLoadDict(op_to_err(target),
+                                             token.token, reg, True))
+        elif isinstance(target, Op):
+            # res_reg:int = state.get_free_reg()
+            if target.op == "simple_idx":
+                args:list[int] = []
+                for exp in target.args:
+                    args.append(self._convert(exp, state))
+                with state.get_free_reg_wrapper() as idx_reg:
+                    state.append_bast(BStoreLoadDict(op_to_err(target),
+                                                     "simple_idx=",
+                                                     idx_reg, False))
+                    state.append_bast(BCall(op_to_err(target),
+                                            [0,idx_reg]+args+[reg],
+                                            clear=args))
+                for _reg in args:
+                    state.mark_as_free_reg(_reg)
+            elif target.op == ".":
+                if not isinstance(target.args[1], Var):
+                    raise NotImplementedError("Impossible")
+                attr:str = target.args[1].identifier.token
+                obj_reg:int = self._convert(target.args[0], state)
+                state.append_bast(BDotDict(op_to_err(target), obj_reg,
+                                           attr, reg, True))
+                state.free_reg(obj_reg)
+            elif target.op == "·,·":
+                with state.get_free_reg_wrapper() as idx_reg:
+                    state.append_bast(BStoreLoadDict(op_to_err(target),
+                                                     "simple_idx",
+                                                     idx_reg, False))
+                    for i, subtarget in enumerate(target.args):
+                        subvalue:int = state.get_free_reg()
+                        lit_reg:int = state.get_free_reg()
+                        state.append_bast(BLiteral(op_to_err(target), lit_reg,
+                                                   BLiteralInt(i),
+                                                   BLiteral.INT_T))
+                        args:list[int] = [subvalue, idx_reg, reg, lit_reg]
+                        state.append_bast(BCall(op_to_err(target), args,
+                                                clear=[lit_reg]))
+                        state.mark_as_free_reg(lit_reg)
+                        self._convert_assign(state, subtarget, subvalue)
+                        state.mark_as_free_reg(subvalue)
+            else:
+                raise NotImplementedError("Impossible")
+        else:
+            raise NotImplementedError("Impossible")
+
     def _convert(self, cmd:Cmd, state:State, name:str="*anonymous*") -> int:
         assert isinstance(cmd, Cmd), "TypeError"
         if not isinstance(cmd, NonLocal):
@@ -460,40 +511,7 @@ class ByteCoder:
                         break
             reg:int = self._convert(cmd.value, state, name=name)
             for target in cmd.targets:
-                if isinstance(target, Var):
-                    token:Token = target.identifier
-                    state.write_env(token)
-                    state.append_bast(BStoreLoadDict(op_to_err(target),
-                                                     token.token, reg, True))
-                elif isinstance(target, Op):
-                    # res_reg:int = state.get_free_reg()
-                    if target.op == "simple_idx":
-                        args:list[int] = []
-                        for exp in target.args:
-                            args.append(self._convert(exp, state))
-                        with state.get_free_reg_wrapper() as tmp_reg:
-                            state.append_bast(BStoreLoadDict(op_to_err(target),
-                                                             "simple_idx=",
-                                                             tmp_reg, False))
-                            state.append_bast(BCall(op_to_err(cmd),
-                                                    [0,tmp_reg]+args+[reg],
-                                                    clear=args))
-                        for _reg in args:
-                            state.mark_as_free_reg(_reg)
-                    elif target.op == ".":
-                        if not isinstance(target.args[1], Var):
-                            raise NotImplementedError("Impossible")
-                        attr:str = target.args[1].identifier.token
-                        obj_reg:int = self._convert(target.args[0], state)
-                        state.append_bast(BDotDict(op_to_err(target), obj_reg,
-                                                   attr, reg, True))
-                        state.free_reg(obj_reg)
-                    elif target.op == "·,·":
-                        raise NotImplementedError("TODO")
-                    else:
-                        raise NotImplementedError("Impossible")
-                else:
-                    raise NotImplementedError("Impossible")
+                self._convert_assign(state, target, reg)
             state.free_reg(reg)
 
         elif isinstance(cmd, Literal):
@@ -513,7 +531,10 @@ class ByteCoder:
                 state.append_bast(BLiteral(op_to_err(cmd), res_reg, val,
                                            BLiteral.STR_T))
             elif value in ("true", "false"):
-                res_reg:int = int(value == "true")
+                res_reg:int = state.get_free_reg()
+                state.append_bast(BLiteral(op_to_err(cmd), res_reg,
+                                           BLiteralBool(value == "true"),
+                                           BLiteral.BOOL_T))
             elif value == "none":
                 res_reg:int = state.get_none_reg()
             elif value.isfloat():
@@ -665,8 +686,9 @@ class ByteCoder:
             #   res_reg := func_label
             res_reg:int = state.get_free_reg()
             link:int = state.get_class_chain()
+            record:bool = (name != CONSTRUCTOR_NAME)
             func_literal:BLiteralFunc = BLiteralFunc(0, label, len(cmd.args),
-                                                     name, link)
+                                                     name, link, record=record)
             link:int = state.get_class_chain()
             state.append_bast(BLiteral(op_to_err(cmd), res_reg, func_literal,
                                        BLiteral.FUNC_T))
@@ -770,7 +792,8 @@ class ByteCoder:
                 bases.append(self._convert(base, state))
             link:int = state.get_class_chain()
             cls_literal:BLiteralClass = BLiteralClass(bases, name)
-            cls_init_lit:BLiteralFunc = BLiteralFunc(0, label, 1, label, link)
+            cls_init_lit:BLiteralFunc = BLiteralFunc(0, label, 1, label, link,
+                                                     record=False)
             state.append_bast(BLiteral(op_to_err(cmd), res_reg, cls_literal,
                                        BLiteral.CLASS_T))
             state.append_bast(BLiteral(op_to_err(cmd), cls_init, cls_init_lit,
@@ -817,7 +840,7 @@ def op_to_err(op:Cmd) -> ErrorIdx:
 if __name__ == "__main__":
     TEST1 = r"""
 io.print("####### General stuff ########")
-io.print(2, "\t", 0.1+0.2==0.3, 0.3==0.1+0.2)
+io.print(2, "\t", int(0.1+0.2==0.3), int(0.3==0.1+0.2))
 
 f = func(x){func(){x}}
 c = func(f){
@@ -826,7 +849,7 @@ c = func(f){
 }
 x = 5
 y = 2
-io.print(1, "\t", 7==c(f(x+y)))
+io.print(1, "\t", int(7==c(f(x+y))))
 
 
 f = func(x, y){
@@ -843,14 +866,16 @@ while (z > 0){
         break
     }
 }
-io.print(1, "\t", 5==z)
+io.print(1, "\t", int(5==z))
 
 
 x = [5, 10, 15]
-io.print(1, "\t", 10==x[1])
+io.print(1, "\t", int(10==x[1]))
 x[1] = 15
 x.append(20)
-io.print(2, "\t", 15==x[1], 20==x[3])
+io.print(2, "\t", int(15==x[1]), int(20==x[3]))
+io.print(2, "\t", int(str.join("", x)=="5151520"),
+                  int(", ".join(x)=="5, 15, 15, 20"))
 
 
 io.print("########## Closures ##########")
@@ -871,7 +896,7 @@ add = tmp[0]
 get = tmp[1]
 add()
 add()
-io.print(2, "\t", 25==x, get()+5==30)
+io.print(2, "\t", int(25==x), int(get()+5==30))
 
 
 # Similar to the one above
@@ -879,11 +904,11 @@ f = func(x){[func(){x}, func(){nonlocal x;x+=1}]}
 tmp = f(1)
 get = tmp[0]
 add = tmp[1]
-io.print(2, "\t", get()*15==15, get()*20==20)
+io.print(2, "\t", int(get()*15==15), int(get()*20==20))
 add()
-io.print(1, "\t", get()*12+1==25)
+io.print(1, "\t", int(get()*12+1==25))
 add()
-io.print(1, "\t", get()*10==30)
+io.print(1, "\t", int(get()*10==30))
 
 
 Y = func(f){
@@ -895,7 +920,7 @@ fact_helper = func(rec){
     }
 }
 fact = Y(fact_helper)
-io.print(1, "\t", 120==fact(5))
+io.print(1, "\t", int(120==fact(5)))
 
 
 io.print("########### Lists ############")
@@ -906,15 +931,28 @@ c = x[1:2]
 d = x[-2:]
 e = x[-2:-1]
 f = x[::-1]
-io.print(5, "\t", a.len()==2, a[0]==1, a[1]==2, b.len()==3, b[0]==3)
-io.print(5, "\t", b[1]==4, b[2]==5, c.len()==1, c[0]==2, d.len()==2)
-io.print(5, "\t", d[0]==4, d[1]==5, e.len()==1, e[0]==4, f.len()==5)
-io.print(3, "\t", f[0]==5, f[-1]==1, f[1]==4)
+i = 1
+æ, ß = [2, 4, func(){nonlocal i; i+=1}()]
+io.print(5, "\t", int(a.len()==2), int(a[0]==1), int(a[1]==2), int(b.len()==3),
+                  int(b[0]==3))
+io.print(5, "\t", int(b[1]==4), int(b[2]==5), int(c.len()==1), int(c[0]==2),
+                  int(d.len()==2))
+io.print(5, "\t", int(d[0]==4), int(d[1]==5), int(e.len()==1), int(e[0]==4),
+                  int(f.len()==5))
+io.print(5, "\t", int(f[0]==5), int(f[-1]==1), int(f[1]==4),
+                  int("abcd"=="dcba"[::-1]), int("abcdef"[1:-1:2]=="bd"))
+io.print(3, "\t", int(æ==2), int(ß==4), int(i==2))
 
 
+io.print("####### Partial funcs ########")
 add = /? + ?/
 add80 = /80 + 2*?/
 add120 = /? + 120/
+io.print(3, "\t", int(200==add(120,80)), int(200==add120(80)),
+                  int(200==add80(60)))
+
+
+io.print("###### Mutual recursion ######")
 isodd = func(x) {
     if (x == 0) {
         return false
@@ -927,19 +965,15 @@ iseven = func(x) {
     }
     return isodd(x-1)
 }
-
-io.print("####### Partial funcs ########")
-io.print(3, "\t", 200==add(120,80), 200==add120(80), 200==add80(60))
-io.print("###### Mutual recursion ######")
-io.print(5, "\t", isodd(101), iseven(246), not isodd(246), not iseven(101),
-         isodd(1))
-io.print(1, "\t", iseven(0))
+io.print(5, "\t", int(isodd(101)), int(iseven(246)), int(not isodd(246)),
+                  int(not iseven(101)), int(isodd(1)))
+io.print(1, "\t", int(iseven(0)))
 
 
 io.print("#### And/Or short-circuit ####")
 ⊥ = func(){⊥()}
-io.print(5, "\t", (5 or ⊥())==5, (0 or 1)==1, (1 and 2)==2, (0 and ⊥())==0,
-                  (1 and 0)==0)
+io.print(5, "\t", int((5 or ⊥())==5), int((0 or 1)==1), int((1 and 2)==2),
+                  int((0 and ⊥())==0), int((1 and 0)==0))
 
 
 io.print("######## Object model ########")
@@ -959,7 +993,7 @@ A = class {
         } else {
             classes.append(A)
         }
-        io.print(1, "\t", A.X==6)
+        io.print(1, "\t", int(A.X==6))
         t = A.X + 2
         A.X = 0
     }
@@ -971,10 +1005,10 @@ A = class {
         }
     }
 }
-io.print(2, "\t", t==5, A.a==1)
+io.print(2, "\t", int(t==5), int(A.a==1))
 A.X = 6
 A.f(7)
-io.print(3, "\t", t==8, A.X==0, A.Y.Z.Δ==13)
+io.print(3, "\t", int(t==8), int(A.X==0), int(A.Y.Z.Δ==13))
 
 a = A()
 objects.append(a)
@@ -991,19 +1025,20 @@ B = class(A) {
 unbounded_funcs.append(B.f)
 bounded_funcs.append(B().f)
 
-io.print(3, "\t", A.X==0, B.X==0, B.Y==0)
+io.print(3, "\t", int(A.X==0), int(B.X==0), int(B.Y==0))
 B.X = 1
-io.print(3, "\t", A.X==0, B.X==1, B.Y==0)
+io.print(3, "\t", int(A.X==0), int(B.X==1), int(B.Y==0))
 A.X = 2
-io.print(3, "\t", A.X==2, B.X==1, B.Y==0)
+io.print(3, "\t", int(A.X==2), int(B.X==1), int(B.Y==0))
 
 
 io.print("######## Is instance #########")
 A = class {}
 a = A()
-io.print(5, "\t", isinstance(a, A), not isinstance(a, int),
-                  isinstance(1, float), not isinstance(1, A),
-                  isinstance("a", str))
+io.print(5, "\t", int(isinstance(a, A)), int(not isinstance(a, int)),
+                  int(isinstance(1, float)), int(not isinstance(1, A)),
+                  int(isinstance("a", str)))
+io.print(2, "\t", int(isinstance(true, int)), int(isinstance(false, bool)))
 
 
 io.print("These should be classes:\t\t", classes)
@@ -1073,6 +1108,7 @@ io.print("lizzzard takes 0.309 sec")
 """[1:-1], False
 
     TEST6 = """
+# class {}
 A = class {
     A = B = 0
 }
@@ -1177,24 +1213,27 @@ io.print("obj_creat++", a.x)
 """[1:-1], False
 
     TEST12 = """
-io.print("######## Is instance #########")
+A = class {y=0}
 A = class {}
+
 a = A()
-io.print(5, "\t", isinstance(a, A), not isinstance(a, int),
-                  isinstance(1, float), not isinstance(1, A),
-                  isinstance("a", str))
+a.x = 0
+while (a.x < 1000) {
+    a.x += 1
+}
 """[1:-1], False
 
-    from os.path import join, dirname, abspath
-    filepath:str = join(dirname(abspath(__file__)), "code-examples",
-                        "raytracer.lizz")
-    with open(filepath, "r") as file:
-        TEST8 = (file.read(), False)
+    if len(argv) == 1:
+        with open("code-examples/raytracer.lizz", "r") as file:
+            TEST8 = (file.read(), False)
 
     # DEBUG_RAISE:bool = True
     # 1:all, 2:fib, 3:primes, 4:while++, 5:rec++, 6:attr++, 7:err, 8:raytracer
     # 9:problem
     TEST = TEST1
+    if len(argv) > 1:
+        with open(argv[1], "r") as file:
+            TEST = (file.read(), False)
     assert not isinstance(TEST, str), "TEST should be tuple[str,bool]"
     parser:Parser = Parser(Tokeniser(StringIO(TEST[0])), colon=TEST[1])
     ast:Body = parser.read()
@@ -1216,8 +1255,11 @@ io.print(5, "\t", isinstance(a, A), not isinstance(a, int),
                 print(bytecode_list_to_str(bytecode))
 
             raw_bytecode:bytes = bytecoder.serialise()
-            with open("code-examples/example.clizz", "wb") as file:
-                file.write(raw_bytecode)
+            filepath:str = "code-examples/example.clizz"
+            if len(argv) > 1:
+                filepath:str = argv[1].removesuffix(".lizz") + ".clizz"
+            with open(filepath, "wb") as file:
+                file.write(b".clizz file" + raw_bytecode)
 
             data = derialise(raw_bytecode)
             (dec_flags, dec_frame_size,

@@ -1,0 +1,1 @@
+__import__("time").sleep(float(__import__("sys").argv[1]))

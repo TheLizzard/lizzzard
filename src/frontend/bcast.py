@@ -275,6 +275,19 @@ class BLiteralInt(BLiteralHolder):
         value, data = derialise_int(data, INT_LITERAL_SIZE)
         return BLiteralInt(value), data
 
+class BLiteralBool(BLiteralHolder):
+    _immutable_fields_ = ["value"]
+    __slots__ = "value"
+    def __init__(self, value):
+        assert isinstance(value, bool), "TypeError"
+        self.value = const(value)
+    def serialise(self):
+        return serialise_int(self.value, 1)
+    def derialise(data):
+        value, data = derialise_int(data, 1)
+        assert 0 <= value <= 1, "ValueError"
+        return BLiteralBool(bool(value)), data
+
 class BLiteralStr(BLiteralHolder):
     _immutable_fields_ = ["value"]
     __slots__ = "value"
@@ -300,16 +313,18 @@ class BLiteralFloat(BLiteralHolder):
         return BLiteralFloat(value), data
 
 class BLiteralFunc(BLiteralHolder):
-    _immutable_fields_ = ["env_size", "tp_label", "nargs", "name"]
-    __slots__ = "env_size", "tp_label", "nargs", "name", "link"
-    def __init__(self, env_size, tp_label, nargs, name, link):
+    _immutable_fields_ = ["env_size", "tp_label", "nargs", "name", "record"]
+    __slots__ = "env_size", "tp_label", "nargs", "name", "link", "record"
+    def __init__(self, env_size, tp_label, nargs, name, link, record=True):
         assert isinstance(env_size, int), "TypeError"
         assert isinstance(tp_label, str), "TypeError"
+        assert isinstance(record, bool), "TypeError"
         assert isinstance(nargs, int), "TypeError"
         assert isinstance(name, str), "TypeError"
         assert isinstance(link, int), "TypeError"
         self.tp_label = const_str(tp_label)
         self.env_size = const(env_size)
+        self.record = const(record)
         self.name = const_str(name)
         self.nargs = const(nargs)
         self.link = const(link)
@@ -319,6 +334,7 @@ class BLiteralFunc(BLiteralHolder):
         data += serialise_str(self.name, NAME_SIZE)
         data += serialise_int(self.nargs, REG_SIZE)
         data += serialise_int(self.link, LINK_SIZE)
+        data += serialise_int(self.record, 1)
         return data
     def derialise(data):
         env_size, data = derialise_int(data, ENV_SIZE_SIZE)
@@ -326,7 +342,11 @@ class BLiteralFunc(BLiteralHolder):
         name, data = derialise_str(data, NAME_SIZE)
         nargs, data = derialise_int(data, REG_SIZE)
         link, data = derialise_int(data, LINK_SIZE)
-        return BLiteralFunc(env_size, tp_label, nargs, name, link), data
+        record, data = derialise_int(data, 1)
+        assert 0 <= record <= 1, "ValueError"
+        return BLiteralFunc(env_size, tp_label, nargs, name, link,
+                            bool(record)), \
+               data
 
 class BLiteralClass(BLiteralHolder):
     _immutable_fields_ = ["bases", "name"]
@@ -375,8 +395,9 @@ class BLiteral(Bast):
     PROC_T = 4
     NONE_T = 5
     LIST_T = 6
-    INT_T = 7
-    STR_T = 8
+    BOOL_T = 7
+    INT_T = 8
+    STR_T = 9
     EMPTY_TS = (UNDEFINED_T, NONE_T, LIST_T)
 
     def __init__(self, err, reg, literal, type):
@@ -393,6 +414,9 @@ class BLiteral(Bast):
     def serialise(self):
         if self.type == BLiteral.INT_T:
             assert isinstance(self.literal, BLiteralInt), "TypeError"
+            literal = self.literal.serialise()
+        elif self.type == BLiteral.BOOL_T:
+            assert isinstance(self.literal, BLiteralBool), "TypeError"
             literal = self.literal.serialise()
         elif self.type in (BLiteral.PROC_T, BLiteral.FUNC_T):
             assert isinstance(self.literal, BLiteralFunc), "TypeError"
@@ -423,6 +447,8 @@ class BLiteral(Bast):
         type, data = derialise_int(data, REG_SIZE)
         if type == BLiteral.INT_T:
             literal, data = BLiteralInt.derialise(data)
+        elif type == BLiteral.BOOL_T:
+            literal, data = BLiteralBool.derialise(data)
         elif type in (BLiteral.PROC_T, BLiteral.FUNC_T):
             literal, data = BLiteralFunc.derialise(data)
         elif type == BLiteral.STR_T:
@@ -472,7 +498,7 @@ class BJump(Bast):
     def derialise(data):
         data = assert_ast_t_id(data, BJump.AST_T_ID)
         label, data = derialise_str(data, NAME_SIZE)
-        negated, data = derialise_int(data, REG_SIZE)
+        negated, data = derialise_int(data, 1)
         condition_reg, data = derialise_int(data, REG_SIZE)
         clear, data = derialise_list_int(data, ARG_SIZE_SIZE, REG_SIZE)
         err, data = ErrorIdx.derialise(data)
@@ -868,7 +894,7 @@ Not implemented:
 """
 
 BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "/",
-               "int", "str", "bool", "list", "float", "isinstance",
+               "int", "str", "bool", "list", "float", "isinstance", "cmd_args",
                "&", "|", "<<", ">>",
                "or", "not", ".", ".=", "idx", "simple_idx", "simple_idx=", "[]"]
 BUILTIN_MODULES = ["math", "io"]
@@ -892,6 +918,7 @@ SPECIAL_ATTRS = [
                   u"close",  # FileObj.close() -> none
                   u"read",   # FileObj.read(int) -> string
                   u"write",  # FileObj.write(string) -> none
+                  u"join",   # <str>.join(list) -> str
                 ]
 BUILTIN_MODULE_SIDES = ["print", "open", "close", "read", "write", "append"]
 CONSTRUCTOR_IDX = 0
@@ -936,10 +963,12 @@ WRITE_IDX = const(get_special_attr_idx(u"write"))
 PRINT_IDX = const(get_special_attr_idx(u"print"))
 APPEND_IDX = const(get_special_attr_idx(u"append"))
 LEN_IDX = const(get_special_attr_idx(u"len"))
+JOIN_IDX = const(get_special_attr_idx(u"join"))
 
 INT_IDX = const(get_special_env_idx(u"int"))
 STR_IDX = const(get_special_env_idx(u"str"))
 BOOL_IDX = const(get_special_env_idx(u"bool"))
 LIST_IDX = const(get_special_env_idx(u"list"))
 FLOAT_IDX = const(get_special_env_idx(u"float"))
+CMD_ARGS_IDX = const(get_special_env_idx(u"cmd_args"))
 ISINSTANCE_IDX = const(get_special_env_idx(u"isinstance"))

@@ -32,7 +32,10 @@ def make_entry_point(lizzzardconfig=None):
             from simple_interpreter import main
         else:
             from interpreter import main
-        exit_code = main("../code-examples/example.clizz")
+        if len(argv) <= 1:
+            exit_code = main("../code-examples/example.clizz", [])
+        else:
+            exit_code = main(argv[1], argv[2:])
         if exit_code == 0:
             done_success()
         else:

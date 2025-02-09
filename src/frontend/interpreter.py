@@ -24,7 +24,13 @@ class IntValue(Value):
         assert isinstance(value, int), "TypeError"
         self.value = value
 
-BoolValue = IntValue # TODO: implement BoolValue
+class BoolValue(Value):
+    _immutable_fields_ = ["value"]
+    __slots__ = "value"
+    @look_inside
+    def __init__(self, value):
+        assert isinstance(value, bool), "TypeError"
+        self.value = value
 
 class StrValue(Value):
     _immutable_fields_ = ["value"]
@@ -90,58 +96,52 @@ class NoneValue(Value):
     def __init__(self): pass
 
 class ObjectValue(Value):
-    _immutable_fields_ = ["attr_vals", "type", "name"]
-    __slots__ = "attr_vals", "type", "name"
+    _immutable_fields_ = ["attr_vals", "obj_info", "is_obj"]
+    __slots__ = "attr_vals", "obj_info", "is_obj"
     @look_inside
-    def __init__(self, type, name):
+    def __init__(self, obj_info, is_obj):
+        assert isinstance(obj_info, ObjectInfo), "TypeError"
+        assert isinstance(is_obj, bool), "TypeError"
+        self.attr_vals = [None]
+        self.obj_info = obj_info
+        self.is_obj = is_obj
+
+class ObjectInfo:
+    _immutable_fields_ = ["type", "name", "mro", "obj_info"]
+    __slots__ = "type", "name", "mro", "obj_info"
+    @unroll_safe
+    @look_inside
+    def __init__(self, type, name, mro, obj_info):
+        if obj_info is not None:
+            assert isinstance(obj_info, ObjectInfo), "TypeError"
         assert isinstance(type, int), "TypeError" # even types for classes and odds for objects of that type
         assert isinstance(name, str), "TypeError"
-        self.attr_vals = [None]*len(SPECIAL_ATTRS)
+        assert isinstance(mro, list), "TypeError"
+        for cls in mro:
+            assert isinstance(cls, ObjectValue), "TypeError"
+            assert not cls.is_obj, "TypeError"
+        self.obj_info = obj_info
         self.type = type
         self.name = name
-
+        self.mro = mro
 
 class ListValue(Value):
     _immutable_fields_ = ["array"]
     __slots__ = "array"
-
     @look_inside
     def __init__(self):
         self.array = []
-
-    @look_inside
-    def append(self, value):
-        assert isinstance(value, Value), "TypeError"
-        self.array.append(value)
-
-    @look_inside
-    @elidable
-    def index(self, idx):
-        assert isinstance(idx, int), "TypeError"
-        return self.array[idx]
-
-    @look_inside
-    def index_set(self, idx, value):
-        assert isinstance(value, Value), "TypeError"
-        assert isinstance(idx, int), "TypeError"
-        self.array[idx] = value
-
-    @look_inside
-    def len(self):
-        return len(self.array)
-
-    def __repr__(self):
-        return u"array[size=" + int_to_str(self.len()) + u"]"
 
 
 epsilon = 6e-8
 NONE = const(NoneValue())
 ZERO = const(IntValue(0))
 ONE = const(IntValue(1))
-FALSE = const(BoolValue(0))
-TRUE = const(BoolValue(1))
+FALSE = const(BoolValue(False))
+TRUE = const(BoolValue(True))
 PI = const(FloatValue(math.pi))
 EPSILON = const(FloatValue(epsilon))
+EMPTY_OBJ = const(ObjectValue(ObjectInfo(98, u"*unreachable*", [], ObjectInfo(99, u"*unreachable*", [], None)), False))
 
 
 # General helpers
@@ -164,6 +164,8 @@ def get_type(value):
         return u"class"
     if isinstance(value, FloatValue):
         return u"float"
+    if isinstance(value, BoolValue):
+        return u"bool"
     if isinstance(value, SpecialValue):
         if value.type == u"module":
             return u"module"
@@ -182,7 +184,9 @@ def force_bool(val):
     if isinstance(val, StrValue):
         return len(val.value) != 0
     if isinstance(val, ListValue):
-        return val.len() != 0
+        return len(val.array) != 0
+    if isinstance(val, BoolValue):
+        return val.value
     if isinstance(val, FloatValue):
         return not (-epsilon < val.value < epsilon)
     return True
@@ -239,32 +243,29 @@ def attr_vals_extend_until_len(attr_vals, new_length):
 
 @unroll_safe
 @look_inside
-def attr_access(mros, attr_matrix, lens, obj, attr, storing):
+def attr_access(attr_matrix, lens, obj, attr, storing):
     # Use the mro to figure out where attr is supposed to be
-    mro = hint(mros[const(obj.type)], promote=True)
-    if obj.type&1:
+    mro = hint(const(obj.obj_info).mro, promote=True)
+    if obj.is_obj:
         mro = [obj] + mro
     for cls in mro:
         if (cls is not obj) and storing:
             continue
-        assert 0 <= cls.type < len(attr_matrix), "InternalError"
-        row = attr_matrix[cls.type]
-        assert 0 <= attr < len(row), "InternalError"
+        cls_type = const(const(cls.obj_info).type)
+        row = hint(attr_matrix[cls_type], promote=True)
         soft, attr_idx = hint(row[attr], promote=True)
         soft, attr_idx = const(soft), const(attr_idx)
         if attr_idx != -1:
-            if soft and (cls.type&1):
+            if soft and cls.is_obj:
                 if (attr_idx >= len(cls.attr_vals)) or (cls.attr_vals[attr_idx] is None):
                     continue
             break
     # Create the attr space in cls if attr_idx is -1
     else:
         cls = obj
-        attr_idx, lens[cls.type] = lens[cls.type], lens[cls.type]+1
-        assert 0 <= attr_idx, "InternalError"
-        assert 0 <= cls.type < len(attr_matrix), "InternalError"
-        row = attr_matrix[cls.type]
-        assert 0 <= attr < len(row), "InternalError"
+        cls_type = const(const(cls.obj_info).type)
+        attr_idx, lens[cls_type] = lens[cls_type], lens[cls_type]+1
+        row = attr_matrix[cls_type]
         row[attr] = (False, attr_idx)
     if len(cls.attr_vals) <= attr_idx:
         attr_vals_extend_until_len(cls.attr_vals, attr_idx+1)
@@ -308,6 +309,12 @@ def _c3_merge(mros):
             return [candidate] + _c3_merge(tails)
             # return [candidate] + _c3_merge([tail if head is candidate else [head, *tail] for head, *tail in mros])
     raise_type_error(u"No legal mro")
+
+@look_inside
+def print_err(text):
+    assert isinstance(text, str), "TypeError"
+    text += u"\n"
+    os.write(2, text.encode("utf-8"))
 
 @look_inside
 def bytecode_debug_str(pc, bt):
@@ -373,7 +380,7 @@ if USE_JIT:
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
     virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
     jitdriver = JitDriver(greens=["frame_size","pc","bytecode","teleports","SOURCE_CODE"],
-                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","mros","global_scope","no_loop"],
+                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","global_scope","no_loop"],
                           virtualizables=virtualizables, get_printable_location=get_location)
 
 
@@ -472,7 +479,7 @@ class InterpreterError(Exception):
 
 
 # Main interpreter
-def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE):
+def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE, cmd_args):
     if not flags.is_set("ENV_IS_LIST"):
         print("\x1b[91m[ERROR]: ENV_IS_LIST==false is not longer supported\x1b[0m")
         raise SystemExit()
@@ -498,6 +505,10 @@ def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE):
     for i, op in enumerate(BUILTIN_MODULES):
         assert isinstance(op, str), "TypeError"
         env[i+frame_size+len(MODULE_ATTRS)] = SpecialValue(u"module", str_value=op)
+    inner_cmd_args = ListValue()
+    for cmd_arg in cmd_args:
+        inner_cmd_args.array.append(StrValue(str(cmd_arg)))
+    env[CMD_ARGS_IDX+frame_size] = inner_cmd_args
     # Start actual interpreter
     return _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size)
 
@@ -508,7 +519,6 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
     next_cls_type = 0
     attr_matrix = hint([], promote=True)
     lens = hint([], promote=True)
-    mros = hint([], promote=True)
     func = FuncValue(0, [], 0, 0, u"main-scope")
     global_scope = hint(env, promote=True)
     frame_size = const(frame_size)
@@ -516,8 +526,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
 
     while pc < len(bytecode):
         if USE_JIT:
-            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
-                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
+            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+                                      attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
             debug(str(bytecode_debug_str(pc, bt)), 3)
@@ -555,7 +565,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 elif isinstance(obj, StrValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
-                    if bt.attr not in (LEN_IDX,):
+                    if bt.attr not in (LEN_IDX, JOIN_IDX):
                         raise_name_error(u"Unknown attribute")
                     env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, SpecialValue):
@@ -584,9 +594,21 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                     else:
                         raise_unreachable_error(u"TODO . operator on SpecialValue with obj.type=" + obj.type)
+                elif isinstance(obj, FuncValue):
+                    if obj is global_scope[STR_IDX+frame_size]:
+                        if bt.attr not in (LEN_IDX, JOIN_IDX):
+                            raise_name_error(u"Unknown attribute")
+                    elif obj is global_scope[LIST_IDX+frame_size]:
+                        if bt.attr not in (LEN_IDX, APPEND_IDX):
+                            raise_name_error(u"Unknown attribute")
+                    else:
+                        raise_name_error(u"cannot access attributes of " + inner_repr(obj))
+                    if bt.storing:
+                        raise_name_error(u"cannot change builtin attribute")
+                    env_store(env, bt.reg, global_scope[bt.attr+frame_size])
                 elif isinstance(obj, ObjectValue):
                     # Get cls (the object storing attr) and attr_idx (the idx into cls.attr_vals)
-                    cls, attr_idx = attr_access(mros, attr_matrix, lens, obj, bt.attr, bt.storing)
+                    cls, attr_idx = attr_access(attr_matrix, lens, obj, bt.attr, bt.storing)
                     # Use the information above to execute the bytecode
                     attr_idx = const(attr_idx)
                     assert 0 <= attr_idx < len(cls.attr_vals), "InternalError"
@@ -594,8 +616,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         attr_vals_store(cls.attr_vals, attr_idx, env_load(env, bt.reg))
                     else:
                         value = attr_vals_load(cls.attr_vals, attr_idx)
-                        obj_type = const(obj.type)
-                        if isinstance(value, FuncValue) and (obj_type&1):
+                        obj_type = const(const(obj.obj_info).type)
+                        if isinstance(value, FuncValue) and obj.is_obj:
                             value = BoundFuncValue(value, obj)
                             _, attr_idx = attr_matrix[obj_type][bt.attr]
                             if attr_idx == -1:
@@ -612,6 +634,9 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 if bt.type == BLiteral.INT_T:
                     assert isinstance(bt_literal, BLiteralInt), "TypeError"
                     literal = IntValue(bt_literal.value)
+                elif bt.type == BLiteral.BOOL_T:
+                    assert isinstance(bt_literal, BLiteralBool), "TypeError"
+                    literal = BoolValue(bt_literal.value)
                 elif bt.type == BLiteral.FUNC_T:
                     assert isinstance(bt_literal, BLiteralFunc), "TypeError"
                     if bt_literal.link == 0:
@@ -620,7 +645,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         master = func.masters[len(func.masters)-bt_literal.link]
                     tp = teleports[bt_literal.tp_label]
                     assert isinstance(tp, IntValue), "InternalError"
-                    if bt_literal.name == CONSTRUCTOR_NAME:
+                    if not bt_literal.record:
                         no_loop[tp.value] = True
                     literal = FuncValue(tp.value, func.masters+[master], bt_literal.env_size, bt_literal.nargs, bt_literal.name)
                 elif bt.type == BLiteral.STR_T:
@@ -644,7 +669,9 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         base = env_load(env, base_reg)
                         if not isinstance(base, ObjectValue):
                             raise_type_error(u"can't inherit from " + get_type(base))
-                        _mros.append(mros[base.type])
+                        if base.is_obj:
+                            raise_type_error(u"can't inherit from " + inner_repr(base))
+                        _mros.append(base.obj_info.mro)
                     # Register new class
                     cls_type, next_cls_type = next_cls_type, next_cls_type+2 # even types for classes and odds for objects of that type
                     for _ in range(2):
@@ -652,10 +679,10 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         row = hint(row, promote=True)
                         row[0] = hint((False, 0), promote=True)
                         attr_matrix.append(row)
-                    lens.extend([len(SPECIAL_ATTRS),len(SPECIAL_ATTRS)])
-                    literal = ObjectValue(cls_type, bt_literal.name)
-                    while len(mros) <= literal.type: mros.append([])
-                    mros[literal.type] = hint([literal]+_c3_merge(_mros), promote=True)
+                    lens.extend([1,1])
+                    mro = [EMPTY_OBJ]+_c3_merge(_mros)
+                    literal = ObjectValue(ObjectInfo(cls_type, bt_literal.name, mro, ObjectInfo(cls_type+1, bt_literal.name, mro, None)), False)
+                    mro[0] = literal
                 else:
                     raise NotImplementedError()
                 env_store(env, bt.reg, literal)
@@ -666,8 +693,6 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 for reg in bt.clear:
                     if reg > 1:
                         env_store(env, reg, None, chk=False)
-                if value is None:
-                    raise_unreachable_error(u"undefined should never be in regs")
                 condition = force_bool(value)
                 # if condition != bt.negated: # RPython's JIT can't constant fold in this form :/
                 if (condition and (not bt.negated)) or ((not condition) and bt.negated):
@@ -676,8 +701,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     old_pc, pc = pc, tp.value
                     assert isinstance(bytecode[pc], Bable), "InternalError"
                     if USE_JIT and (pc < old_pc): # Tell the JIT about the jump
-                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
-                                                attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
+                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+                                                attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
 
             elif isinstance(bt, BRegMove):
                 env_store(env, bt.reg1, env_load(env, bt.reg2))
@@ -688,10 +713,14 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 enter_jit = ENTER_JIT_FUNC_RET and (not no_loop[const(func.tp)])
                 env_store(env, bt.reg, None, chk=False)
                 if not stack:
-                    if not isinstance(value, IntValue):
+                    exit_value = 0
+                    if isinstance(value, IntValue):
+                        exit_value = value.value
+                    elif isinstance(value, BoolValue):
+                        exit_value = int(value.value)
+                    else:
                         raise_type_error(u"exit value should be an int not " + get_type(value))
-                    print(u"[EXIT]: " + int_to_str(value.value))
-                    break
+                    return exit_value
                 if STACK_IS_LIST:
                     env, func, pc, ret_reg = stack.pop()
                 else:
@@ -699,8 +728,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     stack = stack.prev_stack
                 env_store(env, const(ret_reg), value)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
-                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
-                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
                 func = hint(func, promote=True)
 
             elif isinstance(bt, BCall):
@@ -713,20 +742,17 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 elif isinstance(_func, FuncValue):
                     pass
                 elif isinstance(_func, ObjectValue):
-                    _func_type = const(_func.type)
-                    if (_func_type&1) == 0:
+                    if not _func.is_obj:
                         # Create new object and call constructor
-                        self = ObjectValue(_func_type+1, _func.name)
-                        while const(len(mros)) <= self.type: mros.append([])
-                        if const(len(mros[self.type])) == 0:
-                            mros[self.type] = mros[_func_type]
+                        _func = const(_func)
+                        obj_info = const(const(_func.obj_info).obj_info)
+                        self = ObjectValue(obj_info, True)
                         args = [self]
                         _func = const(_func.attr_vals[CONSTRUCTOR_IDX])
                         if _func is None:
                             # Default constructor
                             env_store(env, bt.regs[0], self)
                             continue
-                        enter_jit = False
                         if not isinstance(_func, FuncValue):
                             raise_type_error(u"constructor should be a function not " + get_type(_func))
                     else:
@@ -736,6 +762,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
 
                 _func = const(_func)
                 if _func.tp < len(bytecode):
+                    if no_loop[_func.tp]:
+                        enter_jit = False
                     # Create a new stack frame
                     if STACK_IS_LIST:
                         stack.append((env, func, pc, bt.regs[0]))
@@ -763,11 +791,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     pure_op = bool(_func.env_size)
                     op = BUILTINS[op_idx]
                     args += [env_load(env, bt.regs[i]) for i in range(2,len(bt.regs))]
-                    for arg in args:
-                        if arg is None:
-                            raise_unreachable_error(u"undefined should never be in regs")
                     if op_idx == ISINSTANCE_IDX:
-                        value = inner_isinstance(mros, global_scope, frame_size, args)
+                        value = inner_isinstance(global_scope, frame_size, args)
                     elif pure_op:
                         value = builtin_pure(op, args, op)
                     else:
@@ -779,8 +804,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     if reg > 1:
                         env_store(old_env, reg, None, chk=False)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
-                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size,
-                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, mros=mros, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope, no_loop=no_loop)
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+                                            attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
 
             elif isinstance(bt, BLoadLink) or isinstance(bt, BStoreLoadDict) or isinstance(bt, BDotDict):
                 raise_unreachable_error(u"ENV_IS_LIST==false is not longer supported so this bytecode instruction is illegal")
@@ -798,7 +823,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 while s is not None:
                     funcs.append((s.func, s.pc))
                     s = s.prev_stack
-            print(u"Traceback (most recent call last):")
+            print_err(u"Traceback (most recent call last):")
             for i in range(len(funcs)):
                 stack_func, stack_pc = funcs[len(funcs)-i-1]
                 bt = bytecode[stack_pc-1]
@@ -809,26 +834,30 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 assert start >= 0, "InternalError"
                 if not success:
                     continue
-                print(u"   File \x1b[95m<???>\x1b[0m in \x1b[95m<" + stack_func.name + u">\x1b[0m on line \x1b[95m" + int_to_str(line) + u"\x1b[0m:")
-                print(u" "*6 + line_str[:start] + u"\x1b[91m" + line_str[start:start+size] + u"\x1b[0m" + line_str[start+size:])
-                print(u" "*(start+6) + u"\x1b[91m" + u"^"*size + u"\x1b[0m")
-            print(u"\x1b[93m" + error.msg + u"\x1b[0m")
+                print_err(u"   File \x1b[95m<???>\x1b[0m in \x1b[95m<" + stack_func.name + u">\x1b[0m on line \x1b[95m" + int_to_str(line) + u"\x1b[0m:")
+                print_err(u" "*6 + line_str[:start] + u"\x1b[91m" + line_str[start:start+size] + u"\x1b[0m" + line_str[start+size:])
+                print_err(u" "*(start+6) + u"\x1b[91m" + u"^"*size + u"\x1b[0m")
+            print_err(u"\x1b[93m" + error.msg + u"\x1b[0m")
             return 1
     return 0
 
 
 @unroll_safe
 @look_inside
-def inner_isinstance(mros, global_scope, frame_size, args):
+def inner_isinstance(global_scope, frame_size, args):
     if len(args) != 2:
         raise_type_error(u"isinstance takes 2 arguments")
     instance, cls = args
+    cls = const(cls)
+    if isinstance(instance, ObjectValue):
+        if not instance.is_obj:
+            return FALSE
     if isinstance(cls, FuncValue):
         output = False
         if cls is const(global_scope[INT_IDX+frame_size]):
-            output = isinstance(instance, IntValue)
+            output = isinstance(instance, IntValue) or isinstance(instance, BoolValue)
         elif cls is const(global_scope[FLOAT_IDX+frame_size]):
-            output = isinstance(instance, IntValue) or isinstance(instance, FloatValue)
+            output = isinstance(instance, IntValue) or isinstance(instance, BoolValue) or isinstance(instance, FloatValue)
         elif cls is const(global_scope[STR_IDX+frame_size]):
             output = isinstance(instance, StrValue)
         elif cls is const(global_scope[LIST_IDX+frame_size]):
@@ -841,20 +870,19 @@ def inner_isinstance(mros, global_scope, frame_size, args):
     elif isinstance(cls, ObjectValue):
         if not isinstance(instance, ObjectValue):
             return FALSE
-        cls_type, instance_type = const(cls.type), const(instance.type)
-        if cls_type == instance_type:
+        if cls.is_obj:
+            return FALSE
+        cls_obj_info = const(cls.obj_info)
+        instance_obj_info = const(instance.obj_info)
+        if cls_obj_info.obj_info is const(instance_obj_info):
             return TRUE
-        for super_cls in hint(mros[const(cls_type)], promote=True):
-            super_cls_type = const(super_cls.type)
-            if super_cls_type == instance_type:
+        for super_cls in hint(cls_obj_info.mro, promote=True):
+            if super_cls.obj_info == instance_obj_info:
                 return TRUE
-            if instance_type&1:
-                if super_cls_type == instance_type-1:
-                    return TRUE
         return FALSE
     elif isinstance(cls, ListValue):
         for subcls in cls.array:
-            if inner_isinstance(mros, global_scope, frame_size, [instance, subcls]):
+            if inner_isinstance(global_scope, frame_size, [instance, subcls]):
                 return TRUE
         return FALSE
     else:
@@ -864,44 +892,42 @@ def inner_isinstance(mros, global_scope, frame_size, args):
 # Builtin helpers
 @look_inside
 def builtin_pure(op, args, op_print):
-    if op in (u"+", u"*", u"==", u"!=", u"len", u"idx", u"simple_idx"):
+    if op in (u"*", u"==", u"!="):
         if (len(args) > 0) and isinstance(args[0], ListValue):
-            return builtin_pure_list(op, args, op)
-        elif (len(args) == 2) and isinstance(args[1], ListValue):
-            return builtin_pure_list(op, args, op)
-    elif op in (u"[]", u"simple_idx="):
-        return builtin_pure_list(op, args, op)
-    return builtin_pure_nonlist(op, args, op)
+            return builtin_pure_rollable(op, args, op)
+    elif op in (u"[]", u"idx", u"join"):
+        return builtin_pure_rollable(op, args, op)
+    return builtin_pure_unrollable(op, args, op)
 
+# This can't have @unroll_safe
 @look_inside
-def builtin_pure_list(op, args, op_print):
-    if op == u"+":
-        if len(args) != 2:
-            raise_type_error(op_print + u" expects 2 arguments")
-        arg0, arg1 = args
-        if not isinstance(arg0, ListValue):
-            raise_type_error(get_type(arg0) + u" doesn't support " + op_print + u" with " + get_type(arg1))
-        if not isinstance(arg1, ListValue):
-            raise_type_error(u"can't " + op_print + u" list with " + get_type(arg1))
-        new = ListValue()
-        new.array = arg0.array + arg1.array
-        return new
-
-    elif op == u"*":
+def builtin_pure_rollable(op, args, op_print):
+    if op == u"*":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, ListValue):
-            if not isinstance(arg1, IntValue):
+            mult = 0
+            if isinstance(arg1, IntValue):
+                mult = arg1.value
+            elif isinstance(arg1, BoolValue):
+                mult = int(arg1.value)
+            else:
                 raise_type_error(u"can't " + op_print + u" list with " + get_type(arg1))
             new = ListValue()
-            for _ in range(arg1.value):
+            for _ in range(mult):
                 new.array += arg0.array
             return new
         elif isinstance(arg0, IntValue):
             assert isinstance(arg1, ListValue), "InternalError"
             new = ListValue()
             for _ in range(arg0.value):
+                new.array += arg1.array
+            return new
+        elif isinstance(arg0, BoolValue):
+            assert isinstance(arg1, ListValue), "InternalError"
+            new = ListValue()
+            for _ in range(int(arg0.value)):
                 new.array += arg1.array
             return new
         else:
@@ -914,10 +940,10 @@ def builtin_pure_list(op, args, op_print):
         if isinstance(arg0, ListValue):
             if not isinstance(arg1, ListValue):
                 raise_type_error(u"can't " + op_print + u" list with " + get_type(arg1))
-            if arg0.len() != arg1.len():
+            if len(arg0.array) != len(arg1.array):
                 return FALSE
-            for i in range(arg0.len()):
-                v = builtin_pure(u"==", [arg0.index(i),arg1.index(i)], op_print)
+            for i in range(len(arg0.array)):
+                v = builtin_pure(u"==", [arg0.array[i],arg1.array[i]], op_print)
                 assert isinstance(v, BoolValue), "InternalError"
                 if not v.value:
                     return FALSE
@@ -925,96 +951,51 @@ def builtin_pure_list(op, args, op_print):
         return FALSE
 
     elif op == u"!=":
-        v = builtin_pure_list(u"==", args, op_print)
+        v = builtin_pure_rollable(u"==", args, op_print)
         assert isinstance(v, BoolValue), "InternalError"
         return to_bool_value(not v.value)
-
-    elif op == u"len":
-        if len(args) != 1:
-            raise_type_error(op_print + u" expects 1 argument")
-        arg = args[0]
-        if not isinstance(arg, ListValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg))
-        return IntValue(arg.len())
 
     elif op == u"idx":
         if len(args) != 4:
             raise_type_error(op_print + u" expects 4 arguments (list, start, stop, step)")
         arg0, arg1, arg2, arg3 = args
-        assert isinstance(arg0, ListValue), "InternalError" # builtin*_list should only be called with a list arg
-        length = arg0.len()
-        start = stop = step = 0 # To make rpython's flowspace happy
-        if arg3 is NONE: # step
-            step = 1
-        elif isinstance(arg3, IntValue):
-            step = arg3.value
+        if isinstance(arg0, ListValue):
+            length = len(arg0.array)
+            start, stop, step = _get_full_idx_args(op_print, length, arg1, arg2, arg3)
+            new = ListValue()
+            for idx in range(start, stop, step):
+                if 0 <= idx < length:
+                    new.array.append(arg0.array[idx])
+            return new
+        elif isinstance(arg0, StrValue):
+            length = len(arg0.value)
+            start, stop, step = _get_full_idx_args(op_print, length, arg1, arg2, arg3)
+            new = []
+            for idx in range(start, stop, step):
+                if 0 <= idx < length:
+                    new.append(arg0.value[idx])
+            return StrValue(u"".join(new))
         else:
-            raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the step arg")
-        if step == 0:
-            raise_type_error(op_print + u" doesn't support 0 for the step arg")
-        if arg1 is NONE: # start
-            start = 0 if step > 0 else length
-        elif isinstance(arg1, IntValue):
-            start = arg1.value
-            if start < 0:
-                start += length
-            if start < 0:
-                raise_index_error(u"start-idx = " + int_to_str(start))
-        else:
-            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
-        if arg2 is NONE: # stop
-            stop = -1 if step < 0 else length
-        elif isinstance(arg2, IntValue):
-            stop = arg2.value
-            if stop < 0:
-                stop += length
-            if stop < 0:
-                raise_index_error(u"stop-idx = " + int_to_str(stop))
-        else:
-            raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
-        new = ListValue()
-        for idx in range(start, stop, step):
-            if 0 <= idx < length:
-                new.append(arg0.index(idx))
-        return new
-
-    elif op == u"simple_idx":
-        if len(args) != 2:
-            raise_type_error(op_print + u" expects 2 arguments (list, idx)")
-        arg0, arg1 = args
-        if not isinstance(arg0, ListValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
-        if not isinstance(arg1, IntValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
-        length = arg0.len()
-        idx = arg1.value
-        if idx < 0:
-            idx += length
-        if not (0 <= idx < length):
-            raise_index_error(u"when indexing idx=" + int_to_str(idx))
-        return arg0.index(idx)
-
-    elif op == u"simple_idx=":
-        if len(args) != 3:
-            raise_type_error(op_print + u" expects 3 arguments (list, idx, value)")
-        arg0, arg1, arg2 = args
-        if not isinstance(arg0, ListValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
-        if not isinstance(arg1, IntValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
-        length = arg0.len()
-        idx = arg1.value
-        if idx < 0:
-            idx += length
-        if not (0 <= idx < length):
-            raise_index_error(u"when setting idx=" + int_to_str(idx))
-        arg0.index_set(idx, arg2)
-        return NONE
+            raise_type_error(op_print + u" doesn't support " + get_type(arg0))
 
     elif op == u"[]":
         new = ListValue()
         new.array = args
         return new
+
+    elif op == u"join":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if not isinstance(arg0, StrValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
+        if not isinstance(arg1, ListValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the 2nd arg")
+        sep = arg0.value
+        array = [u""]*len(arg1.array) # pre-allocate space
+        for i in range(len(arg1.array)):
+            array[i] = inner_repr(arg1.array[i])
+        return StrValue(sep.join(array))
 
     else:
         if op == op_print:
@@ -1025,18 +1006,22 @@ def builtin_pure_list(op, args, op_print):
 
 @unroll_safe
 @look_inside
-def builtin_pure_nonlist(op, args, op_print):
+def builtin_pure_unrollable(op, args, op_print):
     if op == u"+":
         if len(args) == 1:
             arg = args[0]
             if isinstance(arg, IntValue):
                 return arg
+            elif isinstance(arg, BoolValue):
+                return IntValue(int(arg.value))
             elif isinstance(arg, FloatValue):
                 return arg
         elif len(args) == 2:
             arg0, arg1 = args
             if isinstance(arg0, IntValue):
                 if isinstance(arg1, IntValue):
+                    return IntValue(arg0.value + arg1.value)
+                elif isinstance(arg1, BoolValue):
                     return IntValue(arg0.value + arg1.value)
                 elif isinstance(arg1, FloatValue):
                     return FloatValue(arg0.value + arg1.value)
@@ -1046,6 +1031,20 @@ def builtin_pure_nonlist(op, args, op_print):
             elif isinstance(arg0, FloatValue):
                 if isinstance(arg1, IntValue):
                     return FloatValue(arg0.value + arg1.value)
+                elif isinstance(arg1, BoolValue):
+                    return FloatValue(arg0.value + arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value + arg1.value)
+            elif isinstance(arg0, ListValue):
+                if isinstance(arg1, ListValue):
+                    new = ListValue()
+                    new.array = arg0.array + arg1.array
+                    return new
+            elif isinstance(arg0, BoolValue):
+                if isinstance(arg1, IntValue):
+                    return IntValue(arg0.value + arg1.value)
+                elif isinstance(arg1, BoolValue):
+                    return IntValue(arg0.value + arg1.value)
                 elif isinstance(arg1, FloatValue):
                     return FloatValue(arg0.value + arg1.value)
         else:
@@ -1056,6 +1055,8 @@ def builtin_pure_nonlist(op, args, op_print):
             arg = args[0]
             if isinstance(arg, IntValue):
                 return IntValue(-arg.value)
+            elif isinstance(arg, BoolValue):
+                return IntValue(-int(arg.value))
             elif isinstance(arg, FloatValue):
                 return FloatValue(-arg.value)
         elif len(args) == 2:
@@ -1063,11 +1064,22 @@ def builtin_pure_nonlist(op, args, op_print):
             if isinstance(arg0, IntValue):
                 if isinstance(arg1, IntValue):
                     return IntValue(arg0.value - arg1.value)
+                elif isinstance(arg1, BoolValue):
+                    return IntValue(arg0.value - arg1.value)
                 elif isinstance(arg1, FloatValue):
                     return FloatValue(arg0.value - arg1.value)
             elif isinstance(arg0, FloatValue):
                 if isinstance(arg1, IntValue):
                     return FloatValue(arg0.value - arg1.value)
+                elif isinstance(arg1, BoolValue):
+                    return FloatValue(arg0.value - arg1.value)
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(arg0.value - arg1.value)
+            elif isinstance(arg0, BoolValue):
+                if isinstance(arg1, IntValue):
+                    return IntValue(arg0.value - arg1.value)
+                elif isinstance(arg1, BoolValue):
+                    return IntValue(arg0.value - arg1.value)
                 elif isinstance(arg1, FloatValue):
                     return FloatValue(arg0.value - arg1.value)
 
@@ -1078,6 +1090,8 @@ def builtin_pure_nonlist(op, args, op_print):
         if isinstance(arg0, IntValue):
             if isinstance(arg1, IntValue):
                 return IntValue(arg0.value * arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return IntValue(arg0.value * arg1.value)
             elif isinstance(arg1, FloatValue):
                 return FloatValue(arg0.value * arg1.value)
             elif isinstance(arg1, StrValue):
@@ -1085,65 +1099,144 @@ def builtin_pure_nonlist(op, args, op_print):
         elif isinstance(arg0, StrValue):
             if isinstance(arg1, IntValue):
                 return StrValue(arg0.value * arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return arg0 if arg1.value else StrValue(u"")
         elif isinstance(arg0, FloatValue):
             if isinstance(arg1, IntValue):
                 return FloatValue(arg0.value * arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return FloatValue(arg0.value * arg1.value)
             elif isinstance(arg1, FloatValue):
                 return FloatValue(arg0.value * arg1.value)
+        elif isinstance(arg0, BoolValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(arg0.value * arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return IntValue(arg0.value * arg1.value)
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(arg0.value * arg1.value)
+            elif isinstance(arg1, StrValue):
+                return arg1 if arg0.value else StrValue(u"")
 
     elif op == u"%":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
+        div0 = div1 = 0
         if isinstance(arg0, IntValue):
-            if isinstance(arg1, IntValue):
-                try:
-                    return IntValue(arg0.value % arg1.value)
-                except ZeroDivisionError:
-                    raise_value_error(u"division by zero")
+            div0 = arg0.value
+        elif isinstance(arg0, BoolValue):
+            div0 = arg0.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg0) + u" and " + get_type(arg1))
+        if isinstance(arg1, IntValue):
+            div1 = arg1.value
+        elif isinstance(arg1, BoolValue):
+            div1 = arg1.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg1) + u" and " + get_type(arg1))
+        try:
+            return IntValue(div0 % div1)
+        except ZeroDivisionError:
+            raise_value_error(u"division by zero")
 
     elif op == u"//":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
+        div0 = div1 = 0
         if isinstance(arg0, IntValue):
-            if isinstance(arg1, IntValue):
-                try:
-                    return IntValue(arg0.value // arg1.value)
-                except ZeroDivisionError:
-                    raise_value_error(u"division by zero")
+            div0 = arg0.value
+        elif isinstance(arg0, BoolValue):
+            div0 = arg0.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg0) + u" and " + get_type(arg1))
+        if isinstance(arg1, IntValue):
+            div1 = arg1.value
+        elif isinstance(arg1, BoolValue):
+            div1 = arg1.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg1) + u" and " + get_type(arg1))
+        try:
+            return IntValue(div0 // div1)
+        except ZeroDivisionError:
+            raise_value_error(u"division by zero")
 
     elif op == u"<<":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
+        val0 = val1 = 0
         if isinstance(arg0, IntValue):
-            if isinstance(arg1, IntValue):
-                return IntValue(arg0.value << arg1.value)
+            val0 = arg0.value
+        elif isinstance(arg0, BoolValue):
+            val0 = arg0.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg0) + u" and " + get_type(arg1))
+        if isinstance(arg1, IntValue):
+            val1 = arg1.value
+        elif isinstance(arg1, BoolValue):
+            val1 = arg1.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg1) + u" and " + get_type(arg1))
+        return IntValue(val0 << val1)
 
     elif op == u">>":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
+        val0 = val1 = 0
         if isinstance(arg0, IntValue):
-            if isinstance(arg1, IntValue):
-                return IntValue(arg0.value >> arg1.value)
+            val0 = arg0.value
+        elif isinstance(arg0, BoolValue):
+            val0 = arg0.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg0) + u" and " + get_type(arg1))
+        if isinstance(arg1, IntValue):
+            val1 = arg1.value
+        elif isinstance(arg1, BoolValue):
+            val1 = arg1.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg1) + u" and " + get_type(arg1))
+        return IntValue(val0 >> val1)
 
     elif op == u"&":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
+        val0 = val1 = 0
         if isinstance(arg0, IntValue):
-            if isinstance(arg1, IntValue):
-                return IntValue(arg0.value & arg1.value)
+            val0 = arg0.value
+        elif isinstance(arg0, BoolValue):
+            val0 = arg0.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg0) + u" and " + get_type(arg1))
+        if isinstance(arg1, IntValue):
+            val1 = arg1.value
+        elif isinstance(arg1, BoolValue):
+            val1 = arg1.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg1) + u" and " + get_type(arg1))
+        return IntValue(val0 & val1)
 
     elif op == u"|":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
+        val0 = val1 = 0
         if isinstance(arg0, IntValue):
-            if isinstance(arg1, IntValue):
-                return IntValue(arg0.value | arg1.value)
+            val0 = arg0.value
+        elif isinstance(arg0, BoolValue):
+            val0 = arg0.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg0) + u" and " + get_type(arg1))
+        if isinstance(arg1, IntValue):
+            val1 = arg1.value
+        elif isinstance(arg1, BoolValue):
+            val1 = arg1.value
+        else:
+            raise_type_error(op_print + u" unsupported on " + get_type(arg1) + u" and " + get_type(arg1))
+        return IntValue(val0 | val1)
 
     elif op == u"==":
         if len(args) != 2:
@@ -1151,6 +1244,20 @@ def builtin_pure_nonlist(op, args, op_print):
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
             if isinstance(arg1, IntValue):
+                if arg0.value == arg1.value:
+                    return TRUE
+            elif isinstance(arg1, BoolValue):
+                if arg0.value == arg1.value:
+                    return TRUE
+            elif isinstance(arg1, FloatValue):
+                if arg1.value-epsilon < arg0.value < arg1.value+epsilon:
+                    return TRUE
+            return FALSE
+        elif isinstance(arg0, BoolValue):
+            if isinstance(arg1, IntValue):
+                if arg0.value == arg1.value:
+                    return TRUE
+            elif isinstance(arg1, BoolValue):
                 if arg0.value == arg1.value:
                     return TRUE
             elif isinstance(arg1, FloatValue):
@@ -1164,6 +1271,9 @@ def builtin_pure_nonlist(op, args, op_print):
                 return TRUE
         elif isinstance(arg0, FloatValue):
             if isinstance(arg1, IntValue):
+                if arg0.value-epsilon < arg1.value < arg0.value+epsilon:
+                    return TRUE
+            elif isinstance(arg1, BoolValue):
                 if arg0.value-epsilon < arg1.value < arg0.value+epsilon:
                     return TRUE
             elif isinstance(arg1, FloatValue):
@@ -1188,6 +1298,8 @@ def builtin_pure_nonlist(op, args, op_print):
                 return BoolValue(arg0.value < arg1.value)
             elif isinstance(arg1, IntValue):
                 return BoolValue(arg0.value < arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return BoolValue(arg0.value < arg1.value)
         elif isinstance(arg0, StrValue):
             if isinstance(arg1, StrValue):
                 return BoolValue(arg0.value < arg1.value)
@@ -1195,6 +1307,15 @@ def builtin_pure_nonlist(op, args, op_print):
             if isinstance(arg1, FloatValue):
                 return BoolValue(arg0.value < arg1.value)
             elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value < arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return BoolValue(arg0.value < arg1.value)
+        elif isinstance(arg0, BoolValue):
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value < arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value < arg1.value)
+            elif isinstance(arg1, BoolValue):
                 return BoolValue(arg0.value < arg1.value)
 
     elif op == u">":
@@ -1206,6 +1327,8 @@ def builtin_pure_nonlist(op, args, op_print):
                 return BoolValue(arg0.value > arg1.value)
             elif isinstance(arg1, IntValue):
                 return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return BoolValue(arg0.value > arg1.value)
         elif isinstance(arg0, StrValue):
             if isinstance(arg1, StrValue):
                 return BoolValue(arg0.value > arg1.value)
@@ -1213,6 +1336,15 @@ def builtin_pure_nonlist(op, args, op_print):
             if isinstance(arg1, FloatValue):
                 return BoolValue(arg0.value > arg1.value)
             elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, BoolValue):
+                return BoolValue(arg0.value > arg1.value)
+        elif isinstance(arg0, BoolValue):
+            if isinstance(arg1, FloatValue):
+                return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, IntValue):
+                return BoolValue(arg0.value > arg1.value)
+            elif isinstance(arg1, BoolValue):
                 return BoolValue(arg0.value > arg1.value)
 
     elif op == u"<=":
@@ -1233,13 +1365,24 @@ def builtin_pure_nonlist(op, args, op_print):
             if isinstance(arg0, IntValue):
                 if isinstance(arg1, IntValue):
                     return FloatValue(float(arg0.value)/float(arg1.value))
+                elif isinstance(arg1, BoolValue):
+                    return FloatValue(float(arg0.value)/float(arg1.value))
                 elif isinstance(arg1, FloatValue):
                     return FloatValue(float(arg0.value)/arg1.value)
             elif isinstance(arg0, FloatValue):
                 if isinstance(arg1, IntValue):
                     return FloatValue(arg0.value/float(arg1.value))
+                elif isinstance(arg1, BoolValue):
+                    return FloatValue(arg0.value/float(arg1.value))
                 elif isinstance(arg1, FloatValue):
                     return FloatValue(arg0.value/arg1.value)
+            elif isinstance(arg0, BoolValue):
+                if isinstance(arg1, IntValue):
+                    return FloatValue(float(arg0.value)/float(arg1.value))
+                elif isinstance(arg1, BoolValue):
+                    return FloatValue(float(arg0.value)/float(arg1.value))
+                elif isinstance(arg1, FloatValue):
+                    return FloatValue(float(arg0.value)/arg1.value)
         except ZeroDivisionError:
             raise_value_error(u"division by zero")
 
@@ -1248,6 +1391,8 @@ def builtin_pure_nonlist(op, args, op_print):
             raise_type_error(op_print + u" expects only 1 argument")
         arg = args[0]
         if isinstance(arg, IntValue):
+            return FloatValue(math.sqrt(arg.value))
+        elif isinstance(arg, BoolValue):
             return FloatValue(math.sqrt(arg.value))
         elif isinstance(arg, FloatValue):
             return FloatValue(math.sqrt(arg.value))
@@ -1260,13 +1405,24 @@ def builtin_pure_nonlist(op, args, op_print):
         if isinstance(arg0, IntValue):
             if isinstance(arg1, IntValue):
                 return IntValue(int(math.pow(arg0.value, arg1.value)))
+            elif isinstance(arg1, BoolValue):
+                return IntValue(int(math.pow(arg0.value, arg1.value)))
             elif isinstance(arg1, FloatValue):
                 return FloatValue(math.pow(float(arg0.value), arg1.value))
         elif isinstance(arg0, FloatValue):
             if isinstance(arg1, IntValue):
                 return FloatValue(math.pow(arg0.value, float(arg1.value)))
+            elif isinstance(arg1, BoolValue):
+                return FloatValue(math.pow(arg0.value, float(arg1.value)))
             elif isinstance(arg1, FloatValue):
                 return FloatValue(math.pow(arg0.value, arg1.value))
+        elif isinstance(arg0, BoolValue):
+            if isinstance(arg1, IntValue):
+                return IntValue(int(math.pow(arg0.value, arg1.value)))
+            elif isinstance(arg1, BoolValue):
+                return IntValue(int(math.pow(arg0.value, arg1.value)))
+            elif isinstance(arg1, FloatValue):
+                return FloatValue(math.pow(float(arg0.value), arg1.value))
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"tan":
@@ -1274,6 +1430,8 @@ def builtin_pure_nonlist(op, args, op_print):
             raise_type_error(op_print + u" expects only 1 argument")
         arg = args[0]
         if isinstance(arg, IntValue):
+            return FloatValue(math.tan(arg.value*math.pi/180))
+        elif isinstance(arg, BoolValue):
             return FloatValue(math.tan(arg.value*math.pi/180))
         elif isinstance(arg, FloatValue):
             return FloatValue(math.tan(arg.value*math.pi/180))
@@ -1285,8 +1443,22 @@ def builtin_pure_nonlist(op, args, op_print):
         arg = args[0]
         if isinstance(arg, IntValue):
             return FloatValue(math.sin(arg.value*math.pi/180))
+        elif isinstance(arg, BoolValue):
+            return FloatValue(math.sin(arg.value*math.pi/180))
         elif isinstance(arg, FloatValue):
             return FloatValue(math.sin(arg.value*math.pi/180))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"cos":
+        if len(args) != 1:
+            raise_type_error(op_print + u" expects only 1 argument")
+        arg = args[0]
+        if isinstance(arg, IntValue):
+            return FloatValue(math.cos(arg.value*math.pi/180))
+        elif isinstance(arg, BoolValue):
+            return FloatValue(math.cos(arg.value*math.pi/180))
+        elif isinstance(arg, FloatValue):
+            return FloatValue(math.cos(arg.value*math.pi/180))
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"str":
@@ -1302,8 +1474,13 @@ def builtin_pure_nonlist(op, args, op_print):
             return arg
         elif isinstance(arg, FloatValue):
             return IntValue(int(arg.value))
-        elif isinstance(arg, StrValue):
+        elif isinstance(arg, BoolValue):
             return IntValue(int(arg.value))
+        elif isinstance(arg, StrValue):
+            try:
+                return IntValue(int(arg.value))
+            except ValueError:
+                raise_value_error(u"cannot convert " + arg.value + u" into an int")
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"float":
@@ -1311,6 +1488,8 @@ def builtin_pure_nonlist(op, args, op_print):
             raise_type_error(op_print + u" expects only 1 argument")
         arg = args[0]
         if isinstance(arg, IntValue):
+            return FloatValue(float(arg.value))
+        elif isinstance(arg, BoolValue):
             return FloatValue(float(arg.value))
         elif isinstance(arg, FloatValue):
             return arg
@@ -1333,6 +1512,8 @@ def builtin_pure_nonlist(op, args, op_print):
         if len(args) != 1:
             raise_type_error(op_print + u" expects 1 argument")
         arg0 = args[0]
+        if isinstance(arg0, ListValue):
+            return IntValue(len(arg0.array))
         if isinstance(arg0, StrValue):
             return IntValue(len(arg0.value))
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
@@ -1341,43 +1522,47 @@ def builtin_pure_nonlist(op, args, op_print):
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
+        idx = 0
+        if isinstance(arg1, IntValue):
+            idx = arg1.value
+        elif isinstance(arg1, BoolValue):
+            idx = arg1.value
+        else:
+            raise_type_error(op_print + u" expects an int for the index")
         if isinstance(arg0, StrValue):
-            if isinstance(arg1, IntValue):
-                return StrValue(arg0.value[arg1.value])
-            raise_type_error(op_print + u" expects int for the index, got " + get_type(arg1) + u" instead")
+            if idx < 0:
+                idx += len(arg0.value)
+            if not (0 <= idx < len(arg0.value)):
+                raise_index_error(u"idx=" + int_to_str(idx))
+            return StrValue(arg0.value[idx])
+        elif isinstance(arg0, ListValue):
+            if idx < 0:
+                idx += len(arg0.array)
+            if not (0 <= idx < len(arg0.array)):
+                raise_index_error(u"idx=" + int_to_str(idx))
+            return arg0.array[idx]
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
-    elif op == u"idx":
-        if len(args) != 4:
-            raise_type_error(op_print + u" expects 4 arguments")
-        arg0, arg1, arg2, arg3 = args
-        if isinstance(arg0, StrValue):
-            length = len(arg0.value)
-            start = stop = 0 # To make rpython's flowspace happy
-            if arg3 is not NONE:
-                raise_type_error(op_print + u" doesn't support the step arg on str")
-            if arg1 is NONE: # start
-                start = 0
-            elif isinstance(arg1, IntValue):
-                start = arg1.value
-                if start < 0:
-                    start += length
-                if start < 0:
-                    raise_index_error(u"start-idx = " + int_to_str(start))
-            else:
-                raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
-            if arg2 is NONE: # stop
-                stop = length
-            elif isinstance(arg2, IntValue):
-                stop = arg2.value
-                if stop < 0:
-                    stop += length
-                if stop < 0:
-                    raise_index_error(u"stop-idx = " + int_to_str(stop))
-            else:
-                raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
-            return StrValue(arg0.value[start:stop])
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+    elif op == u"simple_idx=":
+        if len(args) != 3:
+            raise_type_error(op_print + u" expects 3 arguments (list, idx, value)")
+        arg0, arg1, arg2 = args
+        if not isinstance(arg0, ListValue):
+            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
+        idx = 0
+        if isinstance(arg1, IntValue):
+            idx = arg1.value
+        elif isinstance(arg1, BoolValue):
+            idx = arg1.value
+        else:
+            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the index")
+        length = len(arg0.array)
+        if idx < 0:
+            idx += length
+        if not (0 <= idx < length):
+            raise_index_error(u"when setting idx=" + int_to_str(idx))
+        arg0.array[idx] = arg2
+        return NONE
 
     else:
         if op == op_print:
@@ -1394,6 +1579,40 @@ def builtin_pure_nonlist(op, args, op_print):
     else:
         raise_unreachable_error(u"builtin-pure " + op + u" doesn't handle type error explicitly even though it has > 2 arguments")
 
+@look_inside
+def _get_full_idx_args(op_print, length, arg1, arg2, arg3):
+    start = stop = step = 0 # To make rpython's flowspace happy
+    if arg3 is NONE: # step
+        step = 1
+    elif isinstance(arg3, IntValue):
+        step = arg3.value
+    elif isinstance(arg3, BoolValue):
+        step = int(arg3.value)
+    else:
+        raise_type_error(op_print + u" doesn't support " + get_type(arg3) + u" for the step arg")
+    if step == 0:
+        raise_type_error(op_print + u" doesn't support 0 for the step arg")
+    if arg1 is NONE: # start
+        start = 0 if step > 0 else length
+    elif isinstance(arg1, IntValue):
+        start = arg1.value
+        if start < 0: start += length
+    elif isinstance(arg1, BoolValue):
+        start = int(arg1.value)
+        if start < 0: start += length
+    else:
+        raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the start arg")
+    if arg2 is NONE: # stop
+        stop = -1 if step < 0 else length
+    elif isinstance(arg2, IntValue):
+        stop = arg2.value
+        if stop < 0: stop += length
+    elif isinstance(arg2, BoolValue):
+        stop = int(arg2.value)
+        if stop < 0: stop += length
+    else:
+        raise_type_error(op_print + u" doesn't support " + get_type(arg2) + u" for the stop arg")
+    return start, stop, step
 
 @look_inside
 def inner_repr(obj):
@@ -1403,6 +1622,8 @@ def inner_repr(obj):
         return u"none"
     elif isinstance(obj, IntValue):
         return int_to_str(obj.value)
+    elif isinstance(obj, BoolValue):
+        return u"true" if obj.value else u"false"
     elif isinstance(obj, FloatValue):
         return str(bytes2(obj.value))
     elif isinstance(obj, StrValue):
@@ -1413,7 +1634,7 @@ def inner_repr(obj):
         string = u"Func<"
         bound_obj = obj.bound_obj
         if isinstance(bound_obj, ObjectValue):
-            string += bound_obj.name + u"."
+            string += bound_obj.obj_info.name + u"."
         else:
             string += get_type(bound_obj) + u"<object>."
         string += obj.func.name + u">"
@@ -1422,14 +1643,14 @@ def inner_repr(obj):
         string = u"["
         for i, element in enumerate(obj.array):
             string += inner_repr(element)
-            if i != obj.len()-1:
+            if i != len(obj.array)-1:
                 string += u", "
         return string + u"]"
     elif isinstance(obj, ObjectValue):
-        if obj.type & 1:
-            return u"<Object " + obj.name + u">"
+        if obj.is_obj:
+            return u"<Object " + obj.obj_info.name + u">"
         else:
-            return u"<Class " + obj.name + u">"
+            return u"<Class " + obj.obj_info.name + u">"
     elif isinstance(obj, SpecialValue):
         if obj.type == u"module":
             return u"<Module " + obj.str_value + u">"
@@ -1448,7 +1669,7 @@ def builtin_side(op, args):
             string += inner_repr(arg)
             if i != len(args)-1:
                 string += u" "
-        print(u"[STDOUT]: " + string)
+        print(string)
         return NONE
 
     elif op == u"append":
@@ -1457,7 +1678,7 @@ def builtin_side(op, args):
         arg0, arg1 = args
         if not isinstance(arg0, ListValue):
             raise_type_error(op + u" expects list for the 1st arg")
-        arg0.append(arg1)
+        arg0.array.append(arg1)
         return NONE
 
     elif op == u"open":
@@ -1606,19 +1827,26 @@ def raise_error(msg):
 
 
 # Main code that reads and deserialises the bytecode
-def _main(raw_bytecode):
+def _main(raw_bytecode, cmd_args, filepath="*unknown*"):
     assert isinstance(raw_bytecode, bytes), "TypeError"
     debug(u"Derialising bytecode...", 2)
-    flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE = derialise(raw_bytecode)
+    try:
+        flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE = derialise(raw_bytecode)
+    except UnicodeDecodeError:
+        print_err(u"\x1b[91m[DecodeError]: Invalid bytecode file \x1b[92m" + str(filepath) + u"\x1b[0m")
+        return 2
     debug(u"Parsing flags...", 2)
     debug(u"Starting interpreter...", 1)
-    return interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE)
+    return interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE, cmd_args)
 
-def main(filepath):
+def main(filepath, cmd_args=[]):
     debug(u"Reading file...", 2)
     with open(filepath, "rb") as file:
+        if file.read(11) != b".clizz file":
+            print_err(u"\x1b[91m[DecodeError]: Invalid bytecode file \x1b[92m" + str(filepath) + u"\x1b[0m")
+            return 2
         data = file.read()
-    return _main(data)
+    return _main(data, cmd_args, filepath)
 
 
 # For testing (note runs with PYTHON == 3)
@@ -1626,7 +1854,11 @@ if __name__ == "__main__":
     if PYTHON == 3:
         from time import perf_counter
         start = perf_counter()
-    main("../code-examples/example.clizz")
+    import sys
+    if len(sys.argv) <= 1:
+        exit_code = main("../code-examples/example.clizz")
+    else:
+        exit_code = main(sys.argv[1], sys.argv[2:])
     if PYTHON == 3:
         print("Time taken: {:.3f}".format(perf_counter()-start))
 
@@ -1645,4 +1877,5 @@ if __name__ == "__main__":
 # https://rpython.readthedocs.io/en/latest/jit/optimizer.html
 # /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/jit/metainterp/optimizeopt
 # https://github.com/hanabi1224/Programming-Language-Benchmarks/tree/main
+# https://www.csl.cornell.edu/~cbatten/pdfs/cheng-type-freezing-slides-cgo2020.pdf
 # https://en.wikipedia.org/wiki/Comparison_of_functional_programming_languages

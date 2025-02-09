@@ -185,3 +185,6 @@ src/code-examples/pypy*
 log/clear_log.run
 log/pypy.run
 log/run.run
+
+# Benchmark clizz files
+src/benchmarks/*/*.clizz
