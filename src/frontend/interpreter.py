@@ -316,6 +316,29 @@ def print_err(text):
     text += u"\n"
     os.write(2, text.encode("utf-8"))
 
+@elidable
+@look_inside
+def fast_pow(base, power):
+    # https://en.wikipedia.org/wiki/Exponentiation_by_squaring#With_constant_auxiliary_memory
+    assert isinstance(base, int), "TypeError"
+    assert isinstance(power, int), "TypeError"
+    assert power >= 0, "ValueError"
+    if power == 0: return 1 # assumes base != 0
+    y = 1
+    while power > 1:
+        if power & 1:
+            y *= base
+            power -= 1
+        base *= base
+        power >>= 1
+    return base*y
+
+@look_inside
+def divmod(a, b):
+    div = a // b
+    mod = a - div*b
+    return div, mod
+
 @look_inside
 def bytecode_debug_str(pc, bt):
     data_unicode = int_to_str(pc,zfill=2) + u"| " + bytecode_list_to_str([bt],mini=True)
@@ -542,7 +565,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 if bt.link == 0:
                     scope = env
                 else:
-                    func = const(func)
+                    if not no_loop[func.tp]:
+                        func = const(func)
                     idx = len(func.masters)-bt.link
                     if idx == 0:
                         scope = global_scope
@@ -559,13 +583,13 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 if isinstance(obj, ListValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
-                    if bt.attr not in (LEN_IDX, APPEND_IDX):
+                    if bt.attr not in (LEN_IDX, APPEND_IDX, INDEX_IDX):
                         raise_name_error(u"Unknown attribute")
                     env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, StrValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
-                    if bt.attr not in (LEN_IDX, JOIN_IDX):
+                    if bt.attr not in (LEN_IDX, JOIN_IDX, INDEX_IDX):
                         raise_name_error(u"Unknown attribute")
                     env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, SpecialValue):
@@ -582,7 +606,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                             elif bt.attr == EPSILON_IDX:
                                 value = EPSILON
                             else:
-                                if bt.attr not in (SQRT_IDX, SIN_IDX, COS_IDX, TAN_IDX, POW_IDX):
+                                if bt.attr not in (SQRT_IDX, SIN_IDX, COS_IDX, TAN_IDX, POW_IDX, ROUND_IDX):
                                     raise_name_error(u"this")
                                 value = global_scope[bt.attr+frame_size]
                         else:
@@ -760,10 +784,12 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 else:
                     raise_type_error(get_type(_func) + u" is not callable")
 
-                _func = const(_func)
-                if _func.tp < len(bytecode):
-                    if no_loop[_func.tp]:
+                _func_tp = _func.tp
+                if _func_tp < len(bytecode):
+                    if no_loop[_func_tp]:
                         enter_jit = False
+                    else:
+                        _func = const(_func)
                     # Create a new stack frame
                     if STACK_IS_LIST:
                         stack.append((env, func, pc, bt.regs[0]))
@@ -787,6 +813,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         env_store(env, i+len(args), env_load(old_env, bt.regs[i]))
                     enter_jit = enter_jit and ENTER_JIT_FUNC_CALL
                 else: # Built-ins
+                    _func = const(_func)
                     op_idx = _func.tp - len(bytecode)
                     pure_op = bool(_func.env_size)
                     op = BUILTINS[op_idx]
@@ -1398,6 +1425,44 @@ def builtin_pure_unrollable(op, args, op_print):
             return FloatValue(math.sqrt(arg.value))
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
+    elif op == u"round":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects only 2 arguments")
+        arg0, arg1 = args
+        round_to = 0
+        if isinstance(arg1, BoolValue):
+            round_to = arg1.value
+        elif isinstance(arg1, IntValue):
+            round_to = arg1.value
+        else:
+            raise_type_error(op_print + u" expects an int for the 2nd argument")
+        if isinstance(arg0, IntValue):
+            if round_to == 0:
+                return arg0
+            elif round_to < 0:
+                tmp = fast_pow(10, -round_to)
+                value = arg0.value
+                mod = value % tmp
+                value += tmp * bool((2*mod > tmp) + (value > 0)*(2*mod == tmp)) # strop guards
+                return IntValue(value-mod)
+            else:
+                return FloatValue(float(arg0.value))
+        elif isinstance(arg0, BoolValue):
+            if round_to == 0:
+                return IntValue(arg0.value)
+            elif round_to > 0:
+                return FloatValue(1.0 * arg0.value)
+            else:
+                return ZERO
+        elif isinstance(arg0, FloatValue):
+            tmp = math.pow(10.0, -float(round_to))
+            value = arg0.value
+            add = 0.5 * (2*(value > 0)-1) # stop guards
+            return FloatValue(tmp * int(arg0.value/tmp + add))
+        else:
+            raise_type_error(op_print + u" expects a number for the 1st argument")
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
     elif op == u"pow":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
@@ -1508,14 +1573,42 @@ def builtin_pure_unrollable(op, args, op_print):
             raise_type_error(op_print + u" expects 1 argument")
         return to_bool_value(not force_bool(args[0]))
 
+    elif op == u"is":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        return to_bool_value(arg0 is arg1)
+
     elif op == u"len":
         if len(args) != 1:
             raise_type_error(op_print + u" expects 1 argument")
         arg0 = args[0]
         if isinstance(arg0, ListValue):
             return IntValue(len(arg0.array))
-        if isinstance(arg0, StrValue):
+        elif isinstance(arg0, StrValue):
             return IntValue(len(arg0.value))
+        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"index":
+        if len(args) != 2:
+            raise_type_error(op_print + u" expects 2 arguments")
+        arg0, arg1 = args
+        if isinstance(arg0, ListValue):
+            for i in range(len(arg0.array)):
+                val = builtin_pure(u"==", [arg0.array[i],arg1], u"==")
+                assert isinstance(val, BoolValue), "InternalError"
+                if val.value:
+                    return IntValue(i)
+            return IntValue(-1)
+        elif isinstance(arg0, StrValue):
+            if not isinstance(arg1, StrValue):
+                raise_type_error(op_print + u" not supported between " + get_type(arg0) + u" and " + get_type(arg1))
+            val = arg1.value
+            len_val = len(val)
+            for i in range(len(arg0.value)-len_val+1):
+                if arg0.value[i:i+len_val] == val:
+                    return IntValue(i)
+            return IntValue(-1)
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"simple_idx":

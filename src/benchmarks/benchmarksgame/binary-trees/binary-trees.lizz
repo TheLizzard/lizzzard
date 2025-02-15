@@ -1,0 +1,88 @@
+# The Computer Language Benchmarks Game
+# https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+#
+# contributed by Isaac Gouy
+
+
+range = func(start, stop, step, callback) {
+    i = start
+    while (i < stop) {
+        callback(i)
+        i += step
+    }
+}
+
+
+Tree = class {
+    __init__ = func(this, left, right) {
+        this.left = left
+        this.right = right
+    }
+
+    with_ = func(depth) {
+        if (depth == 0) {
+            return Tree(none, none)
+        } else {
+            return Tree(Tree.with_(depth-1), Tree.with_(depth-1))
+        }
+    }
+
+    node_count = func(this) {
+        if (this.left is none) {
+            return 1
+        } else {
+            return 1 + this.left.node_count() + this.right.node_count()
+        }
+    }
+
+    clear = func(this) {
+        if (this.left is none) {
+            return
+        }
+        this.left.clear()
+        this.right.clear()
+        this.left = none
+        this.right = none
+    }
+}
+
+
+main = func(n) {
+    MIN_DEPTH = 4
+    max_depth = (MIN_DEPTH + 2) if (MIN_DEPTH + 2 > n) else n
+    stretch_depth = max_depth + 1
+
+    stretch(stretch_depth)
+    long_lived_tree = Tree.with_(max_depth)
+
+    iterations = _depth = sum = 0
+    range(MIN_DEPTH, stretch_depth, 2, func(depth) {
+        nonlocal iterations, _depth, sum
+        _depth = depth
+        iterations = 1 << (max_depth - depth + MIN_DEPTH)
+        sum = 0
+        range(0, iterations, 1, func(_) {
+            sum += count(depth)
+        })
+    })
+    io.print(str(iterations) + "\t trees of depth " + str(_depth) + "\t check:",
+             sum)
+
+    c = long_lived_tree.node_count()
+    long_lived_tree.clear()
+    io.print("long lived tree of depth " + str(max_depth) + "\t check:", c)
+}
+
+stretch = func(depth) {
+    io.print("stretch tree of depth " + str(depth) + "\t check:", count(depth))
+}
+
+count = func(depth) {
+    t = Tree.with_(depth)
+    c = t.node_count()
+    t.clear()
+    return c
+}
+
+n = int(cmd_args[0])
+main(n)

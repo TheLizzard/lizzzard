@@ -5,7 +5,7 @@ https://en.wikipedia.org/wiki/The_Computer_Language_Benchmarks_Game
     >   programming languages.
 
 Python3:
-    https://benchmarksgame-team.pages.debian.net/benchmarksgame/measurements/python3.html
+    https://benchmarksgame-team.pages.debian.net/benchmarksgame/
 
 Mirror:
     https://github.com/Byron/benchmarksgame-cvs-mirror

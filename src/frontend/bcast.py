@@ -896,7 +896,8 @@ Not implemented:
 BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "/",
                "int", "str", "bool", "list", "float", "isinstance", "cmd_args",
                "&", "|", "<<", ">>",
-               "or", "not", ".", ".=", "idx", "simple_idx", "simple_idx=", "[]"]
+               "or", "not", ".", ".=", "idx", "simple_idx", "simple_idx=", "[]",
+               "is"]
 BUILTIN_MODULES = ["math", "io"]
 
 # "__class__" was in BULTIN_HELPERS but class scope no longer gets an env
@@ -904,6 +905,7 @@ CLS_REG = 2
 
 SPECIAL_ATTRS = [
                   u"__init__",
+                  u"round",  # math.round(int|float, int) -> int|float
                   u"sqrt",   # math.sqrt(float) -> float
                   u"sin",    # math.sin(float) -> float
                   u"cos",    # math.cos(float) -> float
@@ -912,13 +914,14 @@ SPECIAL_ATTRS = [
                   u"PI",     # math.PI : float
                   u"ε",      # math.ε : float
                   u"append", # <list>.append(object) -> none
-                  u"len",    # <list/string>.len() -> int
-                  u"print",  # io.print(string) -> none
-                  u"open",   # io.open(string, string) -> FileObj
+                  u"len",    # <list|str>.len() -> int
+                  u"print",  # io.print(str) -> none
+                  u"open",   # io.open(str, str) -> FileObj
                   u"close",  # FileObj.close() -> none
-                  u"read",   # FileObj.read(int) -> string
-                  u"write",  # FileObj.write(string) -> none
+                  u"read",   # FileObj.read(int) -> str
+                  u"write",  # FileObj.write(str) -> none
                   u"join",   # <str>.join(list) -> str
+                  u"index",  # <list|str>.find(object|str) -> int
                 ]
 BUILTIN_MODULE_SIDES = ["print", "open", "close", "read", "write", "append"]
 CONSTRUCTOR_IDX = 0
@@ -949,6 +952,7 @@ assert len(BUILTINS) == len(REAL_BUILTINS), "Invalid"
 SPECIAL_ATTRS = hint(SPECIAL_ATTRS, promote=True)
 
 
+ROUND_IDX = const(get_special_attr_idx(u"round"))
 SQRT_IDX = const(get_special_attr_idx(u"sqrt"))
 SIN_IDX = const(get_special_attr_idx(u"sin"))
 COS_IDX = const(get_special_attr_idx(u"cos"))
@@ -964,6 +968,7 @@ PRINT_IDX = const(get_special_attr_idx(u"print"))
 APPEND_IDX = const(get_special_attr_idx(u"append"))
 LEN_IDX = const(get_special_attr_idx(u"len"))
 JOIN_IDX = const(get_special_attr_idx(u"join"))
+INDEX_IDX = const(get_special_attr_idx(u"index"))
 
 INT_IDX = const(get_special_env_idx(u"int"))
 STR_IDX = const(get_special_env_idx(u"str"))

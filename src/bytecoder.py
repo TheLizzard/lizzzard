@@ -264,6 +264,12 @@ class State:
             link += 1
         return link
 
+    def is_global_scope(self) -> bool:
+        state:State = self
+        while state.class_state:
+            state:State = state.master
+        return state.master is None
+
     # Reg helpers
     def free_reg(self, reg:int) -> None:
         assert isinstance(reg, int), "TypeError"
@@ -574,6 +580,10 @@ class ByteCoder:
                 state.append_bast(BRegMove(res_reg, tmp_reg))
                 state.free_reg(tmp_reg)
                 state.append_bast(label_end)
+            elif cmd.op == "·,·":
+                new_cmd:Cmd = Op(cmd.ft, cmd.lt, cmd.op.name_as("[]"),
+                                 *cmd.args)
+                return self._convert(new_cmd, state, name)
             elif cmd.op == ".":
                 if not isinstance(cmd.args[1], Var):
                     raise NotImplementedError("Impossible")
@@ -686,7 +696,7 @@ class ByteCoder:
             #   res_reg := func_label
             res_reg:int = state.get_free_reg()
             link:int = state.get_class_chain()
-            record:bool = (name != CONSTRUCTOR_NAME)
+            record:bool = (name != CONSTRUCTOR_NAME) and state.is_global_scope()
             func_literal:BLiteralFunc = BLiteralFunc(0, label, len(cmd.args),
                                                      name, link, record=record)
             link:int = state.get_class_chain()
@@ -876,6 +886,8 @@ x.append(20)
 io.print(2, "\t", int(15==x[1]), int(20==x[3]))
 io.print(2, "\t", int(str.join("", x)=="5151520"),
                   int(", ".join(x)=="5, 15, 15, 20"))
+io.print(4, "\t", int("abcdef".index("cd")==2), int("abcdef".index("cf")==-1),
+                  int(x.index(15)==1), int(x.index(200)==-1))
 
 
 io.print("########## Closures ##########")
@@ -1039,6 +1051,36 @@ io.print(5, "\t", int(isinstance(a, A)), int(not isinstance(a, int)),
                   int(isinstance(1, float)), int(not isinstance(1, A)),
                   int(isinstance("a", str)))
 io.print(2, "\t", int(isinstance(true, int)), int(isinstance(false, bool)))
+
+
+io.print("############ Math ############")
+io.print(5, "\t", int(math.round(-0.1691,6)==-0.1691),
+                  int(math.round(-0.1691,5)==-0.1691),
+                  int(math.round(-0.1691,4)==-0.1691),
+                  int(math.round(-0.1691,3)==-0.169),
+                  int(math.round(-0.1691,2)==-0.17))
+io.print(5, "\t", int(math.round(-0.1691,1)==-0.2),
+                  int(math.round(-0.1691,0)==0),
+                  int(math.round(-0.1691,-1)==0),
+                  int(math.round(-0.1691,-2)==0),
+                  int(math.round(-0.1691,-3)==0))
+io.print(5, "\t", int(math.round(12,0)==12), int(math.round(12,1)==12),
+                  int(math.round(12,2)==12), int(math.round(12,-1)==10),
+		  int(math.round(15,-1)==20))
+io.print(5, "\t", int(math.round(19,-1)==20), int(math.round(false,0)==0),
+                  int(math.round(false,1)==0), int(math.round(false,-1)==0),
+                  int(math.round(true,0)==1))
+io.print(5, "\t", int(math.round(true,1)==1), int(math.round(true,-1)==0),
+                  int(math.round(1.2,1)==1.2), int(math.round(1.2,2)==1.2),
+                  int(math.round(1.2,0)==1))
+io.print(5, "\t", int(math.round(1.2,-1)==0), int(math.round(1.5,1)==1.5),
+                  int(math.round(1.5,2)==1.5), int(math.round(1.5,0)==2),
+                  int(math.round(1.5,-1)==0))
+io.print(5, "\t", int(math.round(0.05,1)==0.1), int(math.round(-0.05,1)==-0.1),
+                  int(math.round(0.5,0)==1), int(math.round(-0.5,0)==-1),
+                  int(math.round(5,-1)==10))
+io.print(3, "\t", int(math.round(-5,-1)==-10), int(math.round(-4,-1)==0),
+                  int(math.round(4,-1)==0))
 
 
 io.print("These should be classes:\t\t", classes)
@@ -1221,6 +1263,9 @@ a.x = 0
 while (a.x < 1000) {
     a.x += 1
 }
+"""[1:-1], False
+
+    TEST13 = """
 """[1:-1], False
 
     if len(argv) == 1:

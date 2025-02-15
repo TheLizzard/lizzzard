@@ -5,8 +5,9 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 from os import path, environ
 
-LIZZ_EXECUTABLE:str = "../frontend/lizzzard"
 JIT_LOG_PATH:str = "../jit.log"
+LIZZ_EXECUTABLE:tuple[str] = ("../frontend/lizzzard",)
+# LIZZ_EXECUTABLE:tuple[str] = ("python3", "../frontend/interpreter.py")
 
 
 BENCHMARKS = {
@@ -16,8 +17,10 @@ BENCHMARKS = {
                                  ],
                "benchmarksgame":
                                  [
-                                   # ("fasta", ("25000000",)),
                                    ("fasta", ("2500000",)),
+                                   ("fannkuch", ("10",)),
+                                   ("binary-trees", ("17",)),
+                                   ("n-body", ("50000",)),
                                  ],
              }
 
@@ -39,7 +42,7 @@ def main() -> None:
 
 def run_lizz_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     def _run(_:float) -> None:
-        run(LIZZ_EXECUTABLE, compiled_file, *args,
+        run(*LIZZ_EXECUTABLE, compiled_file, *args,
             onsuccess=print_test_success(benchmark_name, test_name, "lizz"),
             onfail=print_fail(benchmark_name, test_name, "lizz", "RUN"),
             chk_expected=(benchmark_name,test_name),
@@ -62,7 +65,8 @@ def run_c_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
 
 THIS:str = path.dirname(path.abspath(__file__))
 def filename(benchmark_name:str, test_name:str, extension:str) -> str:
-    return path.join(THIS, benchmark_name, test_name) + "." + extension
+    return path.join(THIS, benchmark_name, test_name, test_name) + \
+           "." + extension
 
 def print_test_success(benchmark:str, test:str, runner:str) -> Function:
     def inner(time:float) -> None:

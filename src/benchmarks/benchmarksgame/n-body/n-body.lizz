@@ -1,0 +1,240 @@
+# The Computer Language Benchmarks Game
+# https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+#
+# Naive transliteration from Michael Ferguson's Chapel program
+# contributed by Isaac Gouy
+
+PI = 3.14159265358979323
+SOLAR_MASS = 4 * PI * PI
+DAYS_PER_YEAR = 365.24
+
+
+range = func(start, stop, callback) {
+    i = start
+    while (i < stop) {
+        callback(i)
+        i += 1
+    }
+}
+
+for_each = func(array, callback) { range(0, array.len(), /callback(array[?])/) }
+
+
+USE_RANGE = false
+USE_RANGE = true
+
+
+str_round = func(value, power) {
+    if isinstance(value, int) {
+        io.print(1/0)
+    }
+    value = str(math.round(value, power))
+    return value[:value.index(".")+power+1]
+}
+
+
+Body = class {
+    __init__ = func(this, x, y, z, vx, vy, vz, mass) {
+        this.x = x
+        this.y = y
+        this.z = z
+        this.vx = vx
+        this.vy = vy
+        this.vz = vz
+        this.mass = mass
+    }
+}
+
+offset_momentum = func(bodies) {
+    px = py = pz = 0
+    if USE_RANGE {
+        for_each(bodies, func(body) {
+            nonlocal px, py, pz
+            px += body.vx * body.mass
+            py += body.vy * body.mass
+            pz += body.vz * body.mass
+        })
+    } else {
+        i = 0
+        while (i < bodies.len()) {
+            body = bodies[i]
+            px += body.vx * body.mass
+            py += body.vy * body.mass
+            pz += body.vz * body.mass
+            i += 1
+        }
+    }
+
+    body = bodies[0]
+    body.vx = -px / SOLAR_MASS
+    body.vy = -py / SOLAR_MASS
+    body.vz = -pz / SOLAR_MASS
+}
+
+energy = func(bodies) {
+    e = 0
+    num_bodies = bodies.len()
+    if USE_RANGE {
+        range(0, num_bodies, func(i) {
+            nonlocal e
+            b = bodies[i]
+            sq = b.vx*b.vx + b.vy*b.vy + b.vz*b.vz
+            e += 0.5 * bodies[i].mass * sq
+            range(i+1, num_bodies, func(j) {
+                nonlocal e
+                dx = b.x - bodies[j].x
+                dy = b.y - bodies[j].y
+                dz = b.z - bodies[j].z
+                sq = dx*dx + dy*dy + dz*dz
+                e -= (b.mass * bodies[j].mass) / math.sqrt(sq)
+            })
+        })
+    } else {
+        i = 0
+        while (i < num_bodies) {
+            b = bodies[i]
+            sq = b.vx*b.vx + b.vy*b.vy + b.vz*b.vz
+            e += 0.5 * bodies[i].mass * sq
+            j = i + 1
+            while (j < num_bodies) {
+                dx = b.x - bodies[j].x
+                dy = b.y - bodies[j].y
+                dz = b.z - bodies[j].z
+                sq = dx*dx + dy*dy + dz*dz
+                e -= (b.mass * bodies[j].mass) / math.sqrt(sq)
+                j += 1
+            }
+            i += 1
+        }
+    }
+    return e
+}
+
+
+advance = func(bodies, dt) {
+    if USE_RANGE {
+        num_bodies = bodies.len()
+        range(0, num_bodies, func(i) {
+            range(i+1, num_bodies, func(j) {
+                dx = bodies[i].x - bodies[j].x
+                dy = bodies[i].y - bodies[j].y
+                dz = bodies[i].z - bodies[j].z
+                dpos_norm_sq = dx*dx + dy*dy + dz*dz
+                mag = dt / (dpos_norm_sq * math.sqrt(dpos_norm_sq))
+
+                mj = bodies[j].mass * mag
+                bodies[i].vx -= dx * mj
+                bodies[i].vy -= dy * mj
+                bodies[i].vz -= dz * mj
+
+                mi = bodies[i].mass * mag
+                bodies[j].vx += dx * mi
+                bodies[j].vy += dy * mi
+                bodies[j].vz += dz * mi
+            })
+        })
+
+        for_each(bodies, func(body) {
+            body.x += body.vx * dt
+            body.y += body.vy * dt
+            body.z += body.vz * dt
+        })
+    } else {
+        num_bodies = bodies.len()
+        i = 0
+        while (i < num_bodies) {
+            j = i+1
+            while (j < num_bodies) {
+                dx = bodies[i].x - bodies[j].x
+                dy = bodies[i].y - bodies[j].y
+                dz = bodies[i].z - bodies[j].z
+                dpos_norm_sq = dx*dx + dy*dy + dz*dz
+                mag = dt / (dpos_norm_sq * math.sqrt(dpos_norm_sq))
+
+                mj = bodies[j].mass * mag
+                bodies[i].vx -= dx * mj
+                bodies[i].vy -= dy * mj
+                bodies[i].vz -= dz * mj
+
+                mi = bodies[i].mass * mag
+                bodies[j].vx += dx * mi
+                bodies[j].vy += dy * mi
+                bodies[j].vz += dz * mi
+                j += 1
+            }
+            i += 1
+        }
+
+        i = 0
+        while (i < num_bodies) {
+            bodies[i].x += bodies[i].vx * dt
+            bodies[i].y += bodies[i].vy * dt
+            bodies[i].z += bodies[i].vz * dt
+            i += 1
+        }
+    }
+}
+
+nbody = func(n) {
+    bodies = [
+                # sun
+                Body(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, SOLAR_MASS),
+                # jupiter
+                Body(
+                    4.84143144246472090e+00,
+                    -1.16032004402742839e+00,
+                    -1.03622044471123109e-01,
+                    1.66007664274403694e-03 * DAYS_PER_YEAR,
+                    7.69901118419740425e-03 * DAYS_PER_YEAR,
+                    -6.90460016972063023e-05 * DAYS_PER_YEAR,
+                    9.54791938424326609e-04 * SOLAR_MASS
+                ),
+                # saturn
+                Body(
+                    8.34336671824457987e+00,
+                    4.12479856412430479e+00,
+                    -4.03523417114321381e-01,
+                    -2.76742510726862411e-03 * DAYS_PER_YEAR,
+                    4.99852801234917238e-03 * DAYS_PER_YEAR,
+                    2.30417297573763929e-05 * DAYS_PER_YEAR,
+                    2.85885980666130812e-04 * SOLAR_MASS
+                ),
+                # uranus
+                Body(
+                    1.28943695621391310e+01,
+                    -1.51111514016986312e+01,
+                    -2.23307578892655734e-01,
+                    2.96460137564761618e-03 * DAYS_PER_YEAR,
+                    2.37847173959480950e-03 * DAYS_PER_YEAR,
+                    -2.96589568540237556e-05 * DAYS_PER_YEAR,
+                    4.36624404335156298e-05 * SOLAR_MASS
+                ),
+                # neptune
+                Body(
+                    1.53796971148509165e+01,
+                    -2.59193146099879641e+01,
+                    1.79258772950371181e-01,
+                    2.68067772490389322e-03 * DAYS_PER_YEAR,
+                    1.62824170038242295e-03 * DAYS_PER_YEAR,
+                    -9.51592254519715870e-05 * DAYS_PER_YEAR,
+                    5.15138902046611451e-05 * SOLAR_MASS
+                ),
+             ]
+    offset_momentum(bodies)
+    io.print(str_round(energy(bodies), 3))
+
+    if USE_RANGE {
+        range(0, n, func(i) { advance(bodies, 0.01) })
+    } else {
+        i = 0
+        while (i < n) {
+            advance(bodies, 0.01)
+            i += 1
+        }
+    }
+    io.print(str_round(energy(bodies), 3))
+}
+
+
+n = int(cmd_args[0])
+nbody(n)

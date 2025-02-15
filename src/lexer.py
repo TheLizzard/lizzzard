@@ -460,7 +460,8 @@ class Tokeniser:
                 if (not char) or (char not in allowed):
                     break
                 output += self.under.read(1)
-            return str(int(output, base=base))
+            output:str = str(int(output, base=base))
+            return Token(output, stamp, TokenType.INT)
         else:
             if self.under.peek(1) == ".":
                 self.under.read(1)
@@ -469,6 +470,8 @@ class Tokeniser:
                 is_float:bool = True
             if self.under.peek(1) == "e":
                 self.under.read(1)
+                if self.under.peek(1) == "+": # allow 1e+5
+                    self.under.read(1)
                 chunk:str = self._parse_int()
                 output += "e" + chunk
         token_type:TokenType = TokenType.FLOAT if is_float else TokenType.INT
