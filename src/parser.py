@@ -333,10 +333,10 @@ class Parser:
     def _read_line__colon_block(self) -> tuple[Body,Token]:
         block_start_token:Token = self.tokeniser.peek()
         self._assert_read(BLOCK_START, f'Expected "{BLOCK_START}" here')
-        next_token:Token = self.tokeniser.peek()
-        if (not USING_COLON) and self._try_read(BLOCK_END):
-            return [], next_token
         with self.tokeniser.freeze_indentation.inverse:
+            next_token:Token = self.tokeniser.peek()
+            if (not USING_COLON) and self._try_read(BLOCK_END):
+                return [], next_token
             if self._try_read("\n") or (not USING_COLON):
                 block:Body = self._read_block(indented=True)
             else:
@@ -347,7 +347,7 @@ class Parser:
 
     # Read expr
     def _read_expr(self, precedence:int=0, notype:bool=False,
-                   istype:bool=False) -> Expr:
+                   istype:bool=False, notuple:bool=False) -> Expr:
         """
         For a proper description look at TYPE_PRECEDENCE and EXPR_PRECEDENCE
         """
@@ -356,8 +356,12 @@ class Parser:
         special, assoc, operators = precedence_data[precedence]
         if special:
             if operators == ["·,·"]:
-                return self._read_expr_basic_list(precedence, notype=notype,
-                                                  istype=istype)
+                if notuple:
+                    return self._read_expr(precedence+1, notype=notype,
+                                           istype=istype)
+                else:
+                    return self._read_expr_basic_list(precedence, notype=notype,
+                                                      istype=istype)
             elif operators == ["if_else_expr"]:
                 assert not istype, f"{operators} is only for non-types"
                 return self._read_expr_if_else(precedence, notype=notype)
@@ -659,7 +663,7 @@ class Parser:
         if self._try_read(":"):
             var.type:Expr = self._read_type()
         if self._try_read("="):
-            var.default:Expr = self._read_expr()
+            var.default:Expr = self._read_expr(notuple=True)
         else:
             for _ in filter(lambda x: not isinstance(x, Var), prev):
                 err_token.throw("non-default argument follows default argument")
@@ -738,8 +742,9 @@ def simplify(body:Body, is_func:bool=False) -> Body:
             if not is_func:
                 if not (isinstance(cmd, Literal) and cmd.literal.isstring()):
                     continue
-            if isinstance(cmd, Op) and cmd.op == "call":
-                continue
+            if isinstance(cmd, Op):
+                if cmd.op in ("call", "/", "//", "%"):
+                    continue
             body.pop(i)
             i -= 1
         elif isinstance(cmd, Assign):

@@ -134,6 +134,9 @@ f = func(x) ->
     print(x)
     return
 f(4)
+
+f = func(a=1, b=2) ->
+    return a+b
 """
 RESULT_FUNC:str = """
 Var[f] = ([Var[x]] => [Return(Op(+ Var[x], Literal[1]))])
@@ -148,6 +151,7 @@ Var[f] = ([Var[x]] => [Op(call Var[print], Op(+ Var[x], Literal[1]))])
 Op(call Var[f], Literal[4])
 Var[f] = ([Var[x]] => [Var[x] = Op(+ Var[x], Literal[1]), Op(call Var[print], Var[x]), Return])
 Op(call Var[f], Literal[4])
+Var[f] = ([Var[a default=Literal[1]], Var[b default=Literal[2]]] => [Return(Op(+ Var[a], Var[b]))])
 """
 
 

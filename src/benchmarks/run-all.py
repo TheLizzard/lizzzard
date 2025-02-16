@@ -2,71 +2,135 @@ from __future__ import annotations
 from subprocess import Popen, DEVNULL, PIPE
 from sys import executable as py_executable
 from tempfile import TemporaryDirectory
+from os import path, environ, getcwd
 from time import perf_counter
-from os import path, environ
 
-JIT_LOG_PATH:str = "../jit.log"
-LIZZ_EXECUTABLE:tuple[str] = ("../frontend/lizzzard",)
-# LIZZ_EXECUTABLE:tuple[str] = ("python3", "../frontend/interpreter.py")
+LIZZZARD_JIT_LOG_PATH:str = "../../jit-lizzzard.log"
+PYPY_JIT_LOG_PATH:str = "../../jit-pypy.log"
+LIZZ_EXECUTABLE:tuple[str] = ("../../../frontend/lizzzard",)
+pypy_base:str = path.join(path.dirname(__file__), "pypy")
+pypy_executable:str = path.join(pypy_base, "bin", "pypy3.11")
+
+PYPY_ADD_ENV = {
+                 "LD_LIBRARY_PATH": pypy_base,
+                 "PYPYLOG": "jit-log-opt:" + PYPY_JIT_LOG_PATH
+               }
 
 
+class Generate:
+    def __init__(self, data_file:str, *args:tuple[object]) -> None:
+        self.data_file, self.args = data_file, args
+class StopBenchmark(Exception): ...
+
+
+TEST_REPEAT:int = 1
 BENCHMARKS = {
-               "test":
-                                 [
-                                   # ("sleep", ("3",)), # test timing accuracy
-                                 ],
-               "benchmarksgame":
-                                 [
-                                   ("fasta", ("2500000",)),
-                                   ("fannkuch", ("10",)),
-                                   ("binary-trees", ("17",)),
-                                   ("n-body", ("50000",)),
-                                 ],
+           "test":
+                   [
+                     # ("sleep", (2,)), # test timing accuracy
+                   ],
+           "benchmarksgame":
+                   [
+                     # ("fasta", (2500000,)),
+                     # ("fannkuch", (10,)),
+                     # ("binary-trees", (17,)),
+                     # ("n-body", (500000,)),
+                     # ("mandelbrot", (1000,)),
+                     # ("spectral-norm", (1000,)),
+                     # ("reverse-complement", Generate("data.fasta", 500000)),
+                   ],
+           "simplebenchmarks":
+                   [
+                     # ("fib1", (37,)),
+                     # ("fib2", (37,)),
+                     # ("while++", (100000000,)),
+                     # ("rec++", (10000000,)),
+                     # ("attr++", (100000000,)),
+                     # ("raytracer", ()),
+                     ("prime-sieve", (20000,)),
+                   ],
              }
 
 MAX_TIME_WAIT:float = 600 # wait 60 sec before canceling benchmark test
+def average(times:list[float]) -> float:
+    return sorted(times)[len(times)//2]
 
 _expected:str = {}
 
 
 def main() -> None:
+    # Run each benchmark 3 times (make the median)
     for benchmark_name, benchmarks in BENCHMARKS.items():
         if not benchmarks: continue
         print(f" Starting {benchmark_name!r} ".center(80, "="))
-        for benchmark in benchmarks:
-            print(f"\t{benchmark[0]}:")
-            run_py_benchmark(benchmark_name, *benchmark)
-            run_lizz_benchmark(benchmark_name, *benchmark)
-            run_c_benchmark(benchmark_name, *benchmark)
+        for benchmark, args in benchmarks:
+            if isinstance(args, Generate):
+                try:
+                    generate_data_file(benchmark_name, benchmark, args)
+                except StopBenchmark:
+                    continue
+                args:tuple[str] = (args.data_file,)
+            else:
+                args:tuple[str] = tuple(map(str, args))
+            print(f"\t{benchmark}[{', '.join(map(str,args))}]:")
+            run_py_benchmark(benchmark_name, benchmark, args)
+            run_pypy_benchmark(benchmark_name, benchmark, args)
+            run_lizz_benchmark(benchmark_name, benchmark, args)
+            run_c_benchmark(benchmark_name, benchmark, args)
+
+def generate_data_file(benchmark_name:str, test_name:str, gen:Generate) -> None:
+    gen_file = filename(benchmark_name, test_name, "py", name="gen")
+    _run(py_executable, gen_file, *map(str,gen.args), gen.data_file,
+         onfail=raise_stop_benchmark, onsuccess=lambda f:None,
+         cwd=path.dirname(gen_file))
+
+def raise_stop_benchmark(*_) -> None:
+    raise StopBenchmark()
 
 
 def run_lizz_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     def _run(_:float) -> None:
-        run(*LIZZ_EXECUTABLE, compiled_file, *args,
+        if not path.exists(compiled_file): return
+        run(*LIZZ_EXECUTABLE, compiled_file.split("/")[-1], *args,
             onsuccess=print_test_success(benchmark_name, test_name, "lizz"),
             onfail=print_fail(benchmark_name, test_name, "lizz", "RUN"),
             chk_expected=(benchmark_name,test_name),
-            env=environ|{"PYPYLOG":f"jit-log-opt:{JIT_LOG_PATH}"})
+            add_env={"PYPYLOG":f"jit-log-opt:{LIZZZARD_JIT_LOG_PATH}"},
+            cwd=path.dirname(compiled_file))
 
     src_file:str = filename(benchmark_name, test_name, "lizz")
+    if not path.exists(src_file): return
     compiled_file:str = filename(benchmark_name, test_name, "clizz")
     run(py_executable, "../bytecoder.py", src_file, onsuccess=_run,
         onfail=print_fail(benchmark_name, test_name, "lizz", "COMPILE"))
 
 def run_py_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
-    run(py_executable, filename(benchmark_name, test_name, "py"), *args,
-        onsuccess=print_test_success(benchmark_name, test_name, "py"),
-        onfail=print_fail(benchmark_name, test_name, "py", "RUN"),
-        set_expected=(benchmark_name,test_name))
+    return _run_py_benchmark(py_executable, benchmark_name, test_name, args,
+                             exec_name="py")
+
+def run_pypy_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
+    return _run_py_benchmark(pypy_executable, benchmark_name, test_name, args,
+                             exec_name="pypy", add_env=PYPY_ADD_ENV)
+
+def _run_py_benchmark(executable:str, benchmark_name:str, test_name:str,
+                      args:tuple[str], exec_name:str,
+                      add_env:dict[str:str]={}) -> None:
+    src_file:str = filename(benchmark_name, test_name, "py")
+    if not path.exists(src_file): return
+    run(executable, src_file, *args,
+        onsuccess=print_test_success(benchmark_name, test_name, exec_name),
+        onfail=print_fail(benchmark_name, test_name, exec_name, "RUN"),
+        set_expected=(benchmark_name,test_name), add_env=add_env,
+        cwd=path.dirname(src_file))
 
 def run_c_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     ...
 
 
 THIS:str = path.dirname(path.abspath(__file__))
-def filename(benchmark_name:str, test_name:str, extension:str) -> str:
-    return path.join(THIS, benchmark_name, test_name, test_name) + \
-           "." + extension
+def filename(benchmark_name:str, test_name:str, ext:str, name:str="") -> str:
+    return path.join(THIS, benchmark_name, test_name, name or test_name) + \
+           "." + ext
 
 def print_test_success(benchmark:str, test:str, runner:str) -> Function:
     def inner(time:float) -> None:
@@ -85,17 +149,40 @@ def print_fail(benchmark:str, test:str, runner:str, _type:str) -> Function:
                     break
                 elif inp == "n":
                     break
+        raise_stop_benchmark()
     return inner
 
 
-def run(*args:tuple[str], onsuccess:Function[float,None],
-        onfail:Function[None], set_expected:object=None,
-        chk_expected:object=None, env:dict[str:str]=environ) -> None:
+def _resolve_env(base:dict[str:str], add:dict[str:str]) -> dict[str:str]:
+    new:dict[str:str] = base | add
+    for merge in ("PATH", "LD_LIBRARY_PATH"):
+        if merge in add:
+            new[merge] = (base.get(merge, "") + ":" + add[merge]).strip(":")
+    return new
+
+def run(*args:tuple[str], **kwargs:dict) -> None:
+    old_success = kwargs.pop("onsuccess", lambda t: None)
+    times:list[float] = []
+    def success(time:float):
+        times.append(time)
+    try:
+        for _ in range(TEST_REPEAT):
+            _run(*args, **kwargs, onsuccess=success)
+    except StopBenchmark:
+        pass
+    if len(times) == TEST_REPEAT:
+        old_success(average(times))
+
+CWD:str = getcwd()
+def _run(*args:tuple[str], onsuccess:Function[float,None],
+        onfail:Function[None], set_expected:object=None, cwd:str="",
+        chk_expected:object=None, add_env:dict[str:str]={}) -> None:
+    env:dict[str:str] = _resolve_env(environ, add_env)
     start:float = perf_counter()
     skip_error:bool = False
     try:
         proc:Popen = Popen(args, shell=False, stdin=DEVNULL, stdout=PIPE,
-                           stderr=PIPE, env=env)
+                           stderr=PIPE, env=environ|add_env, cwd=cwd or CWD)
     except FileNotFoundError:
         onfail("FileNotFoundError")
         return None
@@ -121,10 +208,13 @@ def run(*args:tuple[str], onsuccess:Function[float,None],
                             debug_info += stdout_text + "".center(80, "=")
                             onfail(f"ExitCode[{proc.poll()}]", debug_info)
                 if error:
-                    debug_info:str = " STDOUT ".center(80, "=") + "\n"
-                    debug_info += stdout_text + "".center(80, "=") + "\n\n"
-                    debug_info += " STDERR ".center(80, "=") + "\n"
-                    debug_info += stderr_text + "".center(80, "=")
+                    if stdout_text or stderr_text:
+                        debug_info:str = " STDOUT ".center(80, "=") + "\n"
+                        debug_info += stdout_text + "".center(80, "=") + "\n\n"
+                        debug_info += " STDERR ".center(80, "=") + "\n"
+                        debug_info += stderr_text + "".center(80, "=")
+                    else:
+                        debug_info:str = ""
                     onfail(f"ExitCode[{proc.poll()}]", debug_info)
                 else:
                     try:
@@ -136,7 +226,13 @@ def run(*args:tuple[str], onsuccess:Function[float,None],
         onfail("TimeoutError")
     except KeyboardInterrupt as error:
         if not skip_error:
-            onfail("KeyboardInterrupt")
+            stdout_text:str = decode_bytes(proc.stdout.read())
+            stderr_text:str = decode_bytes(proc.stderr.read())
+            debug_info:str = " STDOUT ".center(80, "=") + "\n"
+            debug_info += stdout_text + "".center(80, "=") + "\n\n"
+            debug_info += " STDERR ".center(80, "=") + "\n"
+            debug_info += stderr_text + "".center(80, "=")
+            onfail("KeyboardInterrupt", debug_info)
         raise error
 
 def decode_bytes(data:bytes) -> str:

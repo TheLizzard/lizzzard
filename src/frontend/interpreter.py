@@ -5,6 +5,7 @@ import os
 from python3.rpython_compat import *
 from python3.dict_compat import *
 from python3.int_compat import *
+from python3.str_compat import *
 from python3.star import *
 from bcast import *
 
@@ -49,21 +50,37 @@ class FloatValue(Value):
         self.value = value
 
 class FuncValue(Value):
-    _immutable_fields_ = ["tp", "masters", "env_size", "nargs", "name"]
-    __slots__ = "tp", "masters", "env_size", "nargs", "name"
+    _immutable_fields_ = ["func_info", "masters", "defaults[*]"]
+    __slots__ = "func_info", "masters", "defaults"
     @unroll_safe
     @look_inside
-    def __init__(self, tp, masters, env_size, nargs, name):
+    def __init__(self, func_info, masters, defaults):
+        assert isinstance(defaults, list), "TypeError"
         assert isinstance(masters, list), "TypeError"
+        for default in defaults:
+            assert isinstance(default, Value), "TypeError"
         for master in masters:
             assert isinstance(master, ENV_TYPE), "TypeError"
+        assert isinstance(func_info, FuncInfo), "TypeError"
+        self.func_info = func_info
+        self.defaults = defaults
+        self.masters = masters
+
+class FuncInfo:
+    _immutable_fields_ = ["tp", "env_size", "min_nargs", "max_nargs", "name", "canjit"]
+    __slots__ = "tp", "env_size", "min_nargs", "max_nargs", "name", "canjit"
+    @look_inside
+    def __init__(self, tp, env_size, min_nargs, max_nargs, name, canjit):
+        assert isinstance(min_nargs, int), "TypeError"
+        assert isinstance(max_nargs, int), "TypeError"
         assert isinstance(env_size, int), "TypeError"
-        assert isinstance(nargs, int), "TypeError"
+        assert isinstance(canjit, bool), "TypeError"
         assert isinstance(name, str), "TypeError"
         assert isinstance(tp, int), "TypeError"
+        self.min_nargs = min_nargs
+        self.max_nargs = max_nargs
         self.env_size = env_size
-        self.masters = masters
-        self.nargs = nargs
+        self.canjit = canjit
         self.name = name
         self.tp = tp
 
@@ -333,6 +350,52 @@ def fast_pow(base, power):
         power >>= 1
     return base*y
 
+def _round_int(number, round_to):
+    assert isinstance(round_to, int), "TypeError"
+    assert isinstance(number, int), "TypeError"
+    assert round_to <= 0, "ValueError"
+    if round_to == 0:
+        return number
+    tmp = fast_pow(10, -round_to)
+    mod = number % tmp
+    number += tmp * bool((2*mod > tmp) + (number > 0)*(2*mod == tmp)) # stop rpython guards
+    return number-mod
+
+def _round_float_str(number, round_to):
+    assert isinstance(round_to, int), "TypeError"
+    assert isinstance(number, float), "TypeError"
+
+    if not ((-15 < round_to) and (round_to < 15)):
+        raise_value_error(u"Precision too high")
+
+    if number < 0:
+        output = _round_float_str(-number, round_to)
+        for chr in output:
+            if chr not in (u"0", u"."):
+                return u"-" + output
+        return output
+
+    int_part = int(number)
+    fra_part = number - int_part
+    if round_to <= 0:
+        bit = fast_pow(10, -round_to)
+        tmp = (int_part // bit) * bit
+        if 2*(int_part-tmp+fra_part) >= bit:
+            return int_to_str(tmp + bit)
+        else:
+            return int_to_str(tmp)
+    else:
+        bit = fast_pow(10, round_to)
+        mul_fra_part = fra_part * bit
+        mul_fra_part = int(mul_fra_part+0.5)
+        if mul_fra_part >= bit:
+            int_part += 1
+            mul_fra_part = 0
+        str_mul_fra_part = int_to_str(mul_fra_part)
+        zeros = len(int_to_str(bit)) - len(str_mul_fra_part) - 1
+        str_mul_fra_part = u"0"*zeros + str_mul_fra_part
+        return int_to_str(int_part) + u"." + str_mul_fra_part
+
 @look_inside
 def divmod(a, b):
     div = a // b
@@ -403,7 +466,7 @@ if USE_JIT:
         return "Instruction[%s]" % bytes2(int_to_str(pc,zfill=2))
     virtualizables = ["env"] if ENV_IS_VIRTUALISABLE else []
     jitdriver = JitDriver(greens=["frame_size","pc","bytecode","teleports","SOURCE_CODE"],
-                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","global_scope","no_loop"],
+                          reds=["next_cls_type","stack","env","func","attr_matrix","attrs","lens","global_scope","func_infos"],
                           virtualizables=virtualizables, get_printable_location=get_location)
 
 
@@ -456,6 +519,54 @@ def _line_from_string(string, line_number):
     return last_line
 
 @look_inside
+def _remove_repeating(stack, max_pc):
+    # stack is of type list[FuncInfo,Pc]
+    # We want to remove repeating patterns from the stack
+    #   test = [1, 2,3, 2,3, 2,3, 2,3, 2,3, 4]
+    #   test = [1, 2,3,2, 2,3,2, 2,3,2, 4]
+    #   test = [1, 2,3,2,3,4, 2,3,2,3,4, 2,3,2,3,4, 4]
+    #   test = [1, 2,2,2,2, 4]
+    #   test = [1,1,1,1,1,1,1,1,1,1]
+    new = []
+    i = 0
+    while i < len(stack):
+        for j in range(i+1, len(stack)):
+            # Detect loops
+            looped = 0 # The period of the loop
+            for looped in range(len(stack)-j):
+                if stack[i+looped][1] != stack[j+looped][1]:
+                    break
+                if i+looped == j:
+                    break
+            # If no loop
+            if not looped:
+                continue
+            # Figure out the total number of frames in all of the loops
+            loopeds = 0
+            for loopeds in range(len(stack)-j):
+                if stack[i+loopeds][1] != stack[j+loopeds][1]:
+                    break
+            if j+loopeds+1 == len(stack): # edge case literally
+                loopeds += 1
+            # loops = (total frames in all loops) // (period of a loop)
+            loops = loopeds//looped
+            if loops < 3: # If not enough loops, skip
+                continue
+            # Add the first looped block
+            for k in range(looped):
+                new.append(stack[i+k%looped])
+            # Add a tag showing the period and number of loops
+            new.append((None, loops*max_pc+looped))
+            # new.append(f"last {looped} items repeated {loops} more times")
+            i += looped*loops # Skip the correct number of stack frames
+            break
+        else:
+            # If no loop, add the current stack frame
+            new.append(stack[i])
+            i += 1
+    return new
+
+@look_inside
 def data_from_err_idx(code, err):
     if err.start[0] == err.start[1] == err.end[0] == err.end[1] == 0:
         return -1, u"<code missing>", 0, 14, False
@@ -502,6 +613,8 @@ class InterpreterError(Exception):
 
 
 # Main interpreter
+@unroll_safe
+@look_inside
 def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE, cmd_args):
     if not flags.is_set("ENV_IS_LIST"):
         print("\x1b[91m[ERROR]: ENV_IS_LIST==false is not longer supported\x1b[0m")
@@ -524,7 +637,7 @@ def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE, cmd_arg
     for i, op in enumerate(BUILTINS):
         assert isinstance(op, str), "TypeError"
         pure_op = op not in BUILTIN_MODULE_SIDES
-        env[i+frame_size] = FuncValue(i+len(bytecode), envs, pure_op, 0, op)
+        env[i+frame_size] = FuncValue(FuncInfo(i+len(bytecode), pure_op, 0, 0, op, False), envs, [])
     for i, op in enumerate(BUILTIN_MODULES):
         assert isinstance(op, str), "TypeError"
         env[i+frame_size+len(MODULE_ATTRS)] = SpecialValue(u"module", str_value=op)
@@ -535,6 +648,8 @@ def interpret(flags, frame_size, env_size, attrs, bytecode, SOURCE_CODE, cmd_arg
     # Start actual interpreter
     return _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size)
 
+@unroll_safe
+@look_inside
 def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
     SOURCE_CODE = const_str(SOURCE_CODE)
     pc = 0 # current instruction being executed
@@ -542,14 +657,14 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
     next_cls_type = 0
     attr_matrix = hint([], promote=True)
     lens = hint([], promote=True)
-    func = FuncValue(0, [], 0, 0, u"main-scope")
+    func = FuncValue(FuncInfo(0, 0, 0, 0, u"main-scope", False), [], [])
     global_scope = hint(env, promote=True)
     frame_size = const(frame_size)
-    no_loop = hint([False]*len(bytecode), promote=True)
+    func_infos = hint([None]*len(bytecode), promote=True)
 
     while pc < len(bytecode):
         if USE_JIT:
-            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+            jitdriver.jit_merge_point(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, func_infos=func_infos,
                                       attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
         bt = bytecode[pc]
         if DEBUG_LEVEL >= 3:
@@ -561,17 +676,13 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 pass
 
             elif isinstance(bt, BStoreLoadList):
-                # Get the correct scope
+                # Get the correct scope (bt.link==0 and bt.link==1 are shortcuts to the top/bottom of envs)
                 if bt.link == 0:
                     scope = env
+                elif bt.link == -1:
+                    scope = global_scope
                 else:
-                    if not no_loop[func.tp]:
-                        func = const(func)
-                    idx = len(func.masters)-bt.link
-                    if idx == 0:
-                        scope = global_scope
-                    else:
-                        scope = func.masters[idx]
+                    scope = func.masters[const(len(func.masters))-bt.link]
                 # Store/Load variable
                 if bt.storing:
                     env_store(scope, bt.name+frame_size, env_load(env, bt.reg))
@@ -589,7 +700,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 elif isinstance(obj, StrValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
-                    if bt.attr not in (LEN_IDX, JOIN_IDX, INDEX_IDX):
+                    if bt.attr not in (LEN_IDX, JOIN_IDX, INDEX_IDX, SPLIT_IDX, REPLACE_IDX):
                         raise_name_error(u"Unknown attribute")
                     env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                 elif isinstance(obj, SpecialValue):
@@ -606,7 +717,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                             elif bt.attr == EPSILON_IDX:
                                 value = EPSILON
                             else:
-                                if bt.attr not in (SQRT_IDX, SIN_IDX, COS_IDX, TAN_IDX, POW_IDX, ROUND_IDX):
+                                if bt.attr not in (SQRT_IDX, SIN_IDX, COS_IDX, TAN_IDX, POW_IDX, ROUND_IDX, STR_ROUND_IDX):
                                     raise_name_error(u"this")
                                 value = global_scope[bt.attr+frame_size]
                         else:
@@ -667,11 +778,13 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         master = env
                     else:
                         master = func.masters[len(func.masters)-bt_literal.link]
-                    tp = teleports[bt_literal.tp_label]
-                    assert isinstance(tp, IntValue), "InternalError"
-                    if not bt_literal.record:
-                        no_loop[tp.value] = True
-                    literal = FuncValue(tp.value, func.masters+[master], bt_literal.env_size, bt_literal.nargs, bt_literal.name)
+                    if func_infos[pc] is None:
+                        tp = teleports[bt_literal.tp_label]
+                        assert isinstance(tp, IntValue), "InternalError"
+                        func_infos[pc] = FuncInfo(tp.value, bt_literal.env_size, bt_literal.min_nargs, bt_literal.max_nargs, bt_literal.name, bt_literal.record)
+                    func_info = const(func_infos[pc])
+                    defaults = [env_load(env, reg) for reg in bt_literal.defaults]
+                    literal = FuncValue(func_info, func.masters+[master], defaults)
                 elif bt.type == BLiteral.STR_T:
                     assert isinstance(bt_literal, BLiteralStr), "TypeError"
                     literal = StrValue(bt_literal.value)
@@ -725,7 +838,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     old_pc, pc = pc, tp.value
                     assert isinstance(bytecode[pc], Bable), "InternalError"
                     if USE_JIT and (pc < old_pc): # Tell the JIT about the jump
-                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+                        jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, func_infos=func_infos,
                                                 attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
 
             elif isinstance(bt, BRegMove):
@@ -734,7 +847,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
             elif isinstance(bt, BRet):
                 old_pc = pc
                 value = env_load(env, bt.reg)
-                enter_jit = ENTER_JIT_FUNC_RET and (not no_loop[const(func.tp)])
+                enter_jit = ENTER_JIT_FUNC_RET and const(func.func_info.canjit)
                 env_store(env, bt.reg, None, chk=False)
                 if not stack:
                     exit_value = 0
@@ -752,7 +865,7 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     stack = stack.prev_stack
                 env_store(env, const(ret_reg), value)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
-                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, func_infos=func_infos,
                                             attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
                 func = hint(func, promote=True)
 
@@ -784,38 +897,36 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 else:
                     raise_type_error(get_type(_func) + u" is not callable")
 
-                _func_tp = _func.tp
-                if _func_tp < len(bytecode):
-                    if no_loop[_func_tp]:
-                        enter_jit = False
-                    else:
-                        _func = const(_func)
+                func_info = const(_func.func_info)
+                enter_jit = func_info.canjit
+                if func_info.tp < len(bytecode):
+                    # Check number of args
+                    if len(bt.regs)-2+len(args) > func_info.max_nargs:
+                        raise_type_error(u"too many arguments")
+                    elif len(bt.regs)-2+len(args) < func_info.min_nargs:
+                        raise_type_error(u"too few arguments")
                     # Create a new stack frame
                     if STACK_IS_LIST:
                         stack.append((env, func, pc, bt.regs[0]))
                     else:
                         stack = StackFrame(env, func, pc, bt.regs[0], stack)
                     # Set the pc/env/func
-                    func, old_pc, pc, old_env = _func, pc, _func.tp, env
+                    func, old_pc, pc, old_env = _func, pc, func_info.tp, env
                     if ENV_IS_VIRTUALISABLE:
-                        env = VirtualisableArray(func.env_size+frame_size)
+                        env = VirtualisableArray(func_info.env_size+frame_size)
                     else:
-                        env = [None]*(func.env_size+frame_size)
-                    # Check number of args
-                    if len(bt.regs)-2+len(args) > func.nargs:
-                        raise_type_error(u"too many arguments")
-                    elif len(bt.regs)-2+len(args) < func.nargs:
-                        raise_type_error(u"too few arguments")
+                        env = [None]*(func_info.env_size+frame_size)
                     # Copy arguments values into new env
+                    for i in range(len(func.defaults)):
+                        env_store(env, i+2+func_info.min_nargs, func.defaults[i])
                     for i in range(len(args)):
                         env_store(env, i+2, args[i])
                     for i in range(2, len(bt.regs)):
                         env_store(env, i+len(args), env_load(old_env, bt.regs[i]))
                     enter_jit = enter_jit and ENTER_JIT_FUNC_CALL
                 else: # Built-ins
-                    _func = const(_func)
-                    op_idx = _func.tp - len(bytecode)
-                    pure_op = bool(_func.env_size)
+                    op_idx = func_info.tp - len(bytecode)
+                    pure_op = bool(func_info.env_size)
                     op = BUILTINS[op_idx]
                     args += [env_load(env, bt.regs[i]) for i in range(2,len(bt.regs))]
                     if op_idx == ISINSTANCE_IDX:
@@ -825,13 +936,13 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     else:
                         value = builtin_side(op, args)
                     env_store(env, bt.regs[0], value)
-                    enter_jit, old_env = False, env
+                    old_env = env
                 # Clear the regs in bt.clear
                 for reg in bt.clear:
                     if reg > 1:
                         env_store(old_env, reg, None, chk=False)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
-                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, no_loop=no_loop,
+                    jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, func_infos=func_infos,
                                             attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
 
             elif isinstance(bt, BLoadLink) or isinstance(bt, BStoreLoadDict) or isinstance(bt, BDotDict):
@@ -841,29 +952,43 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 raise NotImplementedError("Haven't implemented this bytecode yet")
 
         except InterpreterError as error:
-            funcs = [(func, pc)]
+            funcs = [(func.func_info, pc)]
             if STACK_IS_LIST:
                 for _, stack_func, _, stack_pc, _ in stack:
-                    funcs.append((stack_func, stack_pc))
+                    funcs.append((stack_func.func_info, stack_pc))
             else:
                 s = stack
                 while s is not None:
-                    funcs.append((s.func, s.pc))
+                    funcs.append((s.func.func_info, s.pc))
                     s = s.prev_stack
-            print_err(u"Traceback (most recent call last):")
+            new_funcs = []
             for i in range(len(funcs)):
-                stack_func, stack_pc = funcs[len(funcs)-i-1]
-                bt = bytecode[stack_pc-1]
-                err_idx = get_err_idx_from_bt(bt)
-                line, line_str, start, size, success = data_from_err_idx(SOURCE_CODE, err_idx)
-                indent = str_count_prefix(line_str, u" ") + str_count_prefix(line_str, u"\t")
-                line_str, start = line_str[indent:], start-indent
-                assert start >= 0, "InternalError"
-                if not success:
-                    continue
-                print_err(u"   File \x1b[95m<???>\x1b[0m in \x1b[95m<" + stack_func.name + u">\x1b[0m on line \x1b[95m" + int_to_str(line) + u"\x1b[0m:")
-                print_err(u" "*6 + line_str[:start] + u"\x1b[91m" + line_str[start:start+size] + u"\x1b[0m" + line_str[start+size:])
-                print_err(u" "*(start+6) + u"\x1b[91m" + u"^"*size + u"\x1b[0m")
+                new_funcs.append(funcs[len(funcs)-i-1])
+            new_funcs = _remove_repeating(new_funcs, len(bytecode))
+            print_err(u"Traceback (most recent call last):")
+            for i, (stack_func,stack_pc) in enumerate(new_funcs):
+                if stack_func is None:
+                    loops = stack_pc // len(bytecode)
+                    looped = stack_pc - loops*len(bytecode)
+                    if looped > 1:
+                        text = u"   [[\x1b[95mLast " + int_to_str(looped) + u" frames repeated "
+                    else:
+                        text = u"   [[\x1b[95mLast frame repeated "
+                    if loops > 1:
+                        text += int_to_str(loops) + u" more times\x1b[0m]]"
+                    else:
+                        text += u"1 more time\x1b[0m]]"
+                    print_err(text)
+                else:
+                    bt = bytecode[stack_pc-1]
+                    err_idx = get_err_idx_from_bt(bt)
+                    line, line_str, start, size, success = data_from_err_idx(SOURCE_CODE, err_idx)
+                    indent = str_count_prefix(line_str, u" ") + str_count_prefix(line_str, u"\t")
+                    line_str, start = line_str[indent:], start-indent
+                    assert start >= 0, "InternalError"
+                    print_err(u"   File \x1b[95m<???>\x1b[0m in \x1b[95m<" + stack_func.name + u">\x1b[0m on line \x1b[95m" + int_to_str(line) + u"\x1b[0m:")
+                    print_err(u" "*6 + line_str[:start] + u"\x1b[91m" + line_str[start:start+size] + u"\x1b[0m" + line_str[start+size:])
+                    print_err(u" "*(start+6) + u"\x1b[91m" + u"^"*size + u"\x1b[0m")
             print_err(u"\x1b[93m" + error.msg + u"\x1b[0m")
             return 1
     return 0
@@ -922,7 +1047,7 @@ def builtin_pure(op, args, op_print):
     if op in (u"*", u"==", u"!="):
         if (len(args) > 0) and isinstance(args[0], ListValue):
             return builtin_pure_rollable(op, args, op)
-    elif op in (u"[]", u"idx", u"join"):
+    elif op in (u"[]", u"$idx", u"join", u"split", u"replace"):
         return builtin_pure_rollable(op, args, op)
     return builtin_pure_unrollable(op, args, op)
 
@@ -982,7 +1107,7 @@ def builtin_pure_rollable(op, args, op_print):
         assert isinstance(v, BoolValue), "InternalError"
         return to_bool_value(not v.value)
 
-    elif op == u"idx":
+    elif op == u"$idx":
         if len(args) != 4:
             raise_type_error(op_print + u" expects 4 arguments (list, start, stop, step)")
         arg0, arg1, arg2, arg3 = args
@@ -1012,17 +1137,84 @@ def builtin_pure_rollable(op, args, op_print):
 
     elif op == u"join":
         if len(args) != 2:
-            raise_type_error(op_print + u" expects 2 arguments")
+            raise_type_error(u"list." + op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if not isinstance(arg0, StrValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
+            raise_type_error(u"list." + op_print + u" doesn't support " + get_type(arg0) + u" for the 1st arg")
         if not isinstance(arg1, ListValue):
-            raise_type_error(op_print + u" doesn't support " + get_type(arg1) + u" for the 2nd arg")
+            raise_type_error(u"list." + op_print + u" doesn't support " + get_type(arg1) + u" for the 2nd arg")
         sep = arg0.value
         array = [u""]*len(arg1.array) # pre-allocate space
         for i in range(len(arg1.array)):
             array[i] = inner_repr(arg1.array[i])
         return StrValue(sep.join(array))
+
+    elif op == u"split":
+        if len(args) == 2:
+            arg0, arg1 = args
+            if not isinstance(arg0, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u" with " + get_type(arg1))
+            if not isinstance(arg1, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u" with " + get_type(arg1))
+            # RPython can't split python2-unicode but can split python2-str
+            array = str_split(arg0.value, arg1.value)
+            new = ListValue()
+            new.array = [NONE]*len(array)
+            for i in range(len(array)):
+                new.array[i] = StrValue(array[i])
+            return new
+        elif len(args) == 3:
+            arg0, arg1, arg2 = args
+            if not isinstance(arg0, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2))
+            if not isinstance(arg1, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2))
+            if not isinstance(arg2, IntValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2))
+            number_split = arg2.value
+            if number_split == -1:
+                return builtin_pure_rollable(op, [arg0,arg1], op_print)
+            if number_split <= 0:
+                raise_value_error(u"the number passed in str." + op_print + u" must be > 0")
+            array = str_split_n(arg0.value, arg1.value, number_split)
+            new = ListValue()
+            new.array = [NONE]*len(array)
+            for i in range(len(array)):
+                new.array[i] = StrValue(array[i])
+            return new
+        else:
+            raise_type_error(u"str." + op_print + u" expects 2 or 3 arguments")
+
+    elif op == u"replace":
+        if len(args) == 3:
+            arg0, arg1, arg2 = args
+            if not isinstance(arg0, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2))
+            if not isinstance(arg1, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2))
+            if not isinstance(arg2, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2))
+            array = str_split(arg0.value, arg1.value)
+            return StrValue(arg2.value.join(array))
+        elif len(args) == 4:
+            arg0, arg1, arg2, arg3 = args
+            if not isinstance(arg0, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2) + u", " + get_type(arg3))
+            if not isinstance(arg1, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2) + u", " + get_type(arg3))
+            if not isinstance(arg2, StrValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2) + u", " + get_type(arg3))
+            if not isinstance(arg3, IntValue):
+                raise_type_error(u"str." + op_print + u" not supported on " + get_type(arg0) + u", " + get_type(arg1) + u", " + get_type(arg2) + u", " + get_type(arg3))
+            number_split = arg3.value
+            if number_split == -1:
+                return builtin_pure_rollable(op, [arg0,arg1,arg2], op_print)
+            if number_split <= 0:
+                raise_value_error(u"the number passed in str." + op_print + u" must be > 0")
+            array = str_split_n(arg0.value, arg1.value, number_split)
+            return StrValue(arg2.value.join(array))
+        else:
+            raise_type_error(u"str." + op_print + u" expects 3 arguments")
 
     else:
         if op == op_print:
@@ -1391,31 +1583,40 @@ def builtin_pure_unrollable(op, args, op_print):
         try:
             if isinstance(arg0, IntValue):
                 if isinstance(arg1, IntValue):
+                    if arg1.value == 0: raise_value_error(u"division by zero")
                     return FloatValue(float(arg0.value)/float(arg1.value))
                 elif isinstance(arg1, BoolValue):
+                    if not arg1.value: raise_value_error(u"division by zero")
                     return FloatValue(float(arg0.value)/float(arg1.value))
                 elif isinstance(arg1, FloatValue):
+                    if arg1.value == 0: raise_value_error(u"division by zero")
                     return FloatValue(float(arg0.value)/arg1.value)
             elif isinstance(arg0, FloatValue):
                 if isinstance(arg1, IntValue):
+                    if arg1.value == 0: raise_value_error(u"division by zero")
                     return FloatValue(arg0.value/float(arg1.value))
                 elif isinstance(arg1, BoolValue):
+                    if not arg1.value: raise_value_error(u"division by zero")
                     return FloatValue(arg0.value/float(arg1.value))
                 elif isinstance(arg1, FloatValue):
+                    if arg1.value == 0: raise_value_error(u"division by zero")
                     return FloatValue(arg0.value/arg1.value)
             elif isinstance(arg0, BoolValue):
                 if isinstance(arg1, IntValue):
+                    if arg1.value == 0: raise_value_error(u"division by zero")
                     return FloatValue(float(arg0.value)/float(arg1.value))
                 elif isinstance(arg1, BoolValue):
+                    if not arg1.value: raise_value_error(u"division by zero")
                     return FloatValue(float(arg0.value)/float(arg1.value))
                 elif isinstance(arg1, FloatValue):
+                    if arg1.value == 0: raise_value_error(u"division by zero")
                     return FloatValue(float(arg0.value)/arg1.value)
         except ZeroDivisionError:
             raise_value_error(u"division by zero")
 
     elif op == u"sqrt":
         if len(args) != 1:
-            raise_type_error(op_print + u" expects only 1 argument")
+            raise_type_error(u"math." + op_print + u" expects only 1 argument")
         arg = args[0]
         if isinstance(arg, IntValue):
             return FloatValue(math.sqrt(arg.value))
@@ -1423,11 +1624,11 @@ def builtin_pure_unrollable(op, args, op_print):
             return FloatValue(math.sqrt(arg.value))
         elif isinstance(arg, FloatValue):
             return FloatValue(math.sqrt(arg.value))
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        raise_type_error(u"math." + op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"round":
         if len(args) != 2:
-            raise_type_error(op_print + u" expects only 2 arguments")
+            raise_type_error(u"math." + op_print + u" expects only 2 arguments")
         arg0, arg1 = args
         round_to = 0
         if isinstance(arg1, BoolValue):
@@ -1435,16 +1636,10 @@ def builtin_pure_unrollable(op, args, op_print):
         elif isinstance(arg1, IntValue):
             round_to = arg1.value
         else:
-            raise_type_error(op_print + u" expects an int for the 2nd argument")
+            raise_type_error(u"math." + op_print + u" expects an int for the 2nd argument")
         if isinstance(arg0, IntValue):
-            if round_to == 0:
-                return arg0
-            elif round_to < 0:
-                tmp = fast_pow(10, -round_to)
-                value = arg0.value
-                mod = value % tmp
-                value += tmp * bool((2*mod > tmp) + (value > 0)*(2*mod == tmp)) # strop guards
-                return IntValue(value-mod)
+            if round_to <= 0:
+                return IntValue(_round_int(arg0.value, round_to))
             else:
                 return FloatValue(float(arg0.value))
         elif isinstance(arg0, BoolValue):
@@ -1460,12 +1655,41 @@ def builtin_pure_unrollable(op, args, op_print):
             add = 0.5 * (2*(value > 0)-1) # stop guards
             return FloatValue(tmp * int(arg0.value/tmp + add))
         else:
-            raise_type_error(op_print + u" expects a number for the 1st argument")
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+            raise_type_error(u"math." + op_print + u" expects a number for the 1st argument")
+        raise_type_error(u"math." + op_print + u" not supported on " + get_type(args[0]))
+
+    elif op == u"str_round":
+        if len(args) != 2:
+            raise_type_error(u"math." + op_print + u" expects only 2 arguments")
+        arg0, arg1 = args
+        round_to = 0
+        if isinstance(arg1, BoolValue):
+            round_to = arg1.value
+        elif isinstance(arg1, IntValue):
+            round_to = arg1.value
+        else:
+            raise_type_error(u"math." + op_print + u" expects an int for the 2nd argument")
+        if isinstance(arg0, IntValue):
+            if round_to <= 0:
+                return StrValue(int_to_str(_round_int(arg0.value, round_to)))
+            else:
+                return StrValue(_round_float_str(float(arg0.value), round_to))
+        elif isinstance(arg0, BoolValue):
+            if round_to == 0:
+                return StrValue(u"1")
+            elif round_to > 0:
+                return StrValue(_round_float_str(float(arg0.value), round_to))
+            else:
+                return StrValue(u"0")
+        elif isinstance(arg0, FloatValue):
+            return StrValue(_round_float_str(arg0.value, round_to))
+        else:
+            raise_type_error(u"math." + op_print + u" expects a number for the 1st argument")
+        raise_type_error(u"math." + op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"pow":
         if len(args) != 2:
-            raise_type_error(op_print + u" expects 2 arguments")
+            raise_type_error(u"math." + op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, IntValue):
             if isinstance(arg1, IntValue):
@@ -1488,11 +1712,11 @@ def builtin_pure_unrollable(op, args, op_print):
                 return IntValue(int(math.pow(arg0.value, arg1.value)))
             elif isinstance(arg1, FloatValue):
                 return FloatValue(math.pow(float(arg0.value), arg1.value))
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        raise_type_error(u"math." + op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"tan":
         if len(args) != 1:
-            raise_type_error(op_print + u" expects only 1 argument")
+            raise_type_error(u"math." + op_print + u" expects only 1 argument")
         arg = args[0]
         if isinstance(arg, IntValue):
             return FloatValue(math.tan(arg.value*math.pi/180))
@@ -1500,11 +1724,11 @@ def builtin_pure_unrollable(op, args, op_print):
             return FloatValue(math.tan(arg.value*math.pi/180))
         elif isinstance(arg, FloatValue):
             return FloatValue(math.tan(arg.value*math.pi/180))
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        raise_type_error(u"math." + op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"sin":
         if len(args) != 1:
-            raise_type_error(op_print + u" expects only 1 argument")
+            raise_type_error(u"math." + op_print + u" expects only 1 argument")
         arg = args[0]
         if isinstance(arg, IntValue):
             return FloatValue(math.sin(arg.value*math.pi/180))
@@ -1512,11 +1736,11 @@ def builtin_pure_unrollable(op, args, op_print):
             return FloatValue(math.sin(arg.value*math.pi/180))
         elif isinstance(arg, FloatValue):
             return FloatValue(math.sin(arg.value*math.pi/180))
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        raise_type_error(u"math." + op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"cos":
         if len(args) != 1:
-            raise_type_error(op_print + u" expects only 1 argument")
+            raise_type_error(u"math." + op_print + u" expects only 1 argument")
         arg = args[0]
         if isinstance(arg, IntValue):
             return FloatValue(math.cos(arg.value*math.pi/180))
@@ -1524,7 +1748,7 @@ def builtin_pure_unrollable(op, args, op_print):
             return FloatValue(math.cos(arg.value*math.pi/180))
         elif isinstance(arg, FloatValue):
             return FloatValue(math.cos(arg.value*math.pi/180))
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        raise_type_error(u"math." + op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"str":
         if len(args) != 1:
@@ -1581,17 +1805,17 @@ def builtin_pure_unrollable(op, args, op_print):
 
     elif op == u"len":
         if len(args) != 1:
-            raise_type_error(op_print + u" expects 1 argument")
+            raise_type_error(u"[list|str]." + op_print + u" expects 1 argument")
         arg0 = args[0]
         if isinstance(arg0, ListValue):
             return IntValue(len(arg0.array))
         elif isinstance(arg0, StrValue):
             return IntValue(len(arg0.value))
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        raise_type_error(u"[list|str]." + op_print + u" not supported on " + get_type(args[0]))
 
     elif op == u"index":
         if len(args) != 2:
-            raise_type_error(op_print + u" expects 2 arguments")
+            raise_type_error(u"[list|str]." + op_print + u" expects 2 arguments")
         arg0, arg1 = args
         if isinstance(arg0, ListValue):
             for i in range(len(arg0.array)):
@@ -1602,16 +1826,16 @@ def builtin_pure_unrollable(op, args, op_print):
             return IntValue(-1)
         elif isinstance(arg0, StrValue):
             if not isinstance(arg1, StrValue):
-                raise_type_error(op_print + u" not supported between " + get_type(arg0) + u" and " + get_type(arg1))
+                raise_type_error(u"[list|str]." + op_print + u" not supported between " + get_type(arg0) + u" and " + get_type(arg1))
             val = arg1.value
             len_val = len(val)
             for i in range(len(arg0.value)-len_val+1):
                 if arg0.value[i:i+len_val] == val:
                     return IntValue(i)
             return IntValue(-1)
-        raise_type_error(op_print + u" not supported on " + get_type(args[0]))
+        raise_type_error(u"[list|str]." + op_print + u" not supported on " + get_type(args[0]))
 
-    elif op == u"simple_idx":
+    elif op == u"$simple_idx":
         if len(args) != 2:
             raise_type_error(op_print + u" expects 2 arguments")
         arg0, arg1 = args
@@ -1626,17 +1850,17 @@ def builtin_pure_unrollable(op, args, op_print):
             if idx < 0:
                 idx += len(arg0.value)
             if not (0 <= idx < len(arg0.value)):
-                raise_index_error(u"idx=" + int_to_str(idx))
+                raise_index_error(u"$idx=" + int_to_str(idx))
             return StrValue(arg0.value[idx])
         elif isinstance(arg0, ListValue):
             if idx < 0:
                 idx += len(arg0.array)
             if not (0 <= idx < len(arg0.array)):
-                raise_index_error(u"idx=" + int_to_str(idx))
+                raise_index_error(u"$idx=" + int_to_str(idx))
             return arg0.array[idx]
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
 
-    elif op == u"simple_idx=":
+    elif op == u"$simple_idx=":
         if len(args) != 3:
             raise_type_error(op_print + u" expects 3 arguments (list, idx, value)")
         arg0, arg1, arg2 = args
@@ -1708,7 +1932,7 @@ def _get_full_idx_args(op_print, length, arg1, arg2, arg3):
     return start, stop, step
 
 @look_inside
-def inner_repr(obj):
+def inner_repr(obj, repr=False):
     if obj is None:
         return u"undefined"
     if obj is NONE:
@@ -1718,11 +1942,14 @@ def inner_repr(obj):
     elif isinstance(obj, BoolValue):
         return u"true" if obj.value else u"false"
     elif isinstance(obj, FloatValue):
-        return str(bytes2(obj.value))
+        return _round_float_str(obj.value, 8)
     elif isinstance(obj, StrValue):
-        return obj.value
+        if repr:
+            return str_repr(obj.value)
+        else:
+            return obj.value
     elif isinstance(obj, FuncValue):
-        return u"Func<" + obj.name + u">"
+        return u"Func<" + obj.func_info.name + u">"
     elif isinstance(obj, BoundFuncValue):
         string = u"Func<"
         bound_obj = obj.bound_obj
@@ -1730,12 +1957,12 @@ def inner_repr(obj):
             string += bound_obj.obj_info.name + u"."
         else:
             string += get_type(bound_obj) + u"<object>."
-        string += obj.func.name + u">"
+        string += obj.func.func_info.name + u">"
         return string
     elif isinstance(obj, ListValue):
         string = u"["
         for i, element in enumerate(obj.array):
-            string += inner_repr(element)
+            string += inner_repr(element, repr=True)
             if i != len(obj.array)-1:
                 string += u", "
         return string + u"]"

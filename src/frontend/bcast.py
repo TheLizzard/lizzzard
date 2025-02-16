@@ -2,10 +2,12 @@
 try:
     from python3.rpython_compat import *
     from python3.int_compat import *
+    from python3.str_compat import *
     from python3.star import *
 except ImportError:
     from .python3.rpython_compat import *
     from .python3.int_compat import *
+    from .python3.str_compat import *
     from .python3.star import *
 
 def serialise_int(integer, size):
@@ -13,6 +15,12 @@ def serialise_int(integer, size):
 def derialise_int(data, size):
     int_bytes, data = data[0:size], data[size:]
     return int_from_bytes(int_bytes), data
+
+def serialise_int_signed(integer, size):
+    return serialise_int(integer+((1<<(size<<3))>>1), size)
+def derialise_int_signed(data, size):
+    integer, data = derialise_int(data, size)
+    return integer-((1<<(size<<3))>>1), data
 
 def serialise_str(string, size_size):
     assert isinstance(size_size, int), "TypeError"
@@ -171,7 +179,7 @@ class BCall(Bast):
             assert isinstance(reg, int), "TypeError"
             assert 0 <= reg < MAX_REG_VALUE, "ValueError"
         self.clear = [const(reg) for reg in clear]
-        self.regs = [const(reg) for reg in regs] # regs[0]:=result, regs[1]:=func
+        self.regs = [const(reg) for reg in regs] # [result, func, *args]
         self.err = const(err)
 
     def serialise(self):
@@ -233,7 +241,7 @@ class BStoreLoadList(Bast):
         assert isinstance(name, int), "TypeError"
         assert isinstance(reg, int), "TypeError"
         assert 0 <= reg < MAX_REG_VALUE, "ValueError"
-        assert 0 <= link < MAX_LINK_VALUE, "ValueError"
+        assert -1 <= link < (MAX_LINK_VALUE>>1), "ValueError"
         self.storing = const(storing)
         self.link = const(link)
         self.name = const(name)
@@ -242,7 +250,7 @@ class BStoreLoadList(Bast):
 
     def serialise(self):
         return serialise_ast_t_id(self.AST_T_ID) + \
-               serialise_int(self.link, LINK_SIZE) + \
+               serialise_int_signed(self.link, LINK_SIZE) + \
                serialise_int(self.name, ENV_SIZE_SIZE) + \
                serialise_int(self.reg, REG_SIZE) + \
                serialise_int(self.storing, 1) + \
@@ -250,7 +258,7 @@ class BStoreLoadList(Bast):
 
     def derialise(data):
         data = assert_ast_t_id(data, BStoreLoadList.AST_T_ID)
-        link, data = derialise_int(data, LINK_SIZE)
+        link, data = derialise_int_signed(data, LINK_SIZE)
         name, data = derialise_int(data, ENV_SIZE_SIZE)
         reg, data = derialise_int(data, REG_SIZE)
         storing, data = derialise_int(data, 1)
@@ -313,40 +321,55 @@ class BLiteralFloat(BLiteralHolder):
         return BLiteralFloat(value), data
 
 class BLiteralFunc(BLiteralHolder):
-    _immutable_fields_ = ["env_size", "tp_label", "nargs", "name", "record"]
-    __slots__ = "env_size", "tp_label", "nargs", "name", "link", "record"
-    def __init__(self, env_size, tp_label, nargs, name, link, record=True):
+    _immutable_fields_ = ["env_size", "tp_label", "min_nargs", "max_nargs",
+                          "name", "defaults", "record"]
+    __slots__ = "env_size", "tp_label", "min_nargs", "max_nargs", "name", \
+                "link", "defaults", "record"
+    def __init__(self, env_size, tp_label, min_nargs, max_nargs, name, link,
+                 defaults, record=True):
+        assert isinstance(min_nargs, int), "TypeError"
+        assert isinstance(max_nargs, int), "TypeError"
         assert isinstance(env_size, int), "TypeError"
         assert isinstance(tp_label, str), "TypeError"
         assert isinstance(record, bool), "TypeError"
-        assert isinstance(nargs, int), "TypeError"
         assert isinstance(name, str), "TypeError"
         assert isinstance(link, int), "TypeError"
+        assert 0 <= env_size < MAX_REG_VALUE, "ValueError"
+        assert 0 <= link <= MAX_LINK_VALUE, "ValueError"
+        assert max_nargs < MAX_REG_VALUE, "ValueError"
+        assert min_nargs <= max_nargs, "ValueError"
+        assert 0 <= min_nargs, "ValueError"
+        self.defaults = [const(default) for default in defaults]
         self.tp_label = const_str(tp_label)
+        self.min_nargs = const(min_nargs)
+        self.max_nargs = const(max_nargs)
         self.env_size = const(env_size)
         self.record = const(record)
         self.name = const_str(name)
-        self.nargs = const(nargs)
         self.link = const(link)
     def serialise(self):
-        data = serialise_int(self.env_size, ENV_SIZE_SIZE)
+        data = serialise_list_int(self.defaults, ARG_SIZE_SIZE, REG_SIZE)
+        data += serialise_int(self.env_size, ENV_SIZE_SIZE)
         data += serialise_str(self.tp_label, FUNC_ID_SIZE)
+        data += serialise_int(self.min_nargs, REG_SIZE)
+        data += serialise_int(self.max_nargs, REG_SIZE)
         data += serialise_str(self.name, NAME_SIZE)
-        data += serialise_int(self.nargs, REG_SIZE)
         data += serialise_int(self.link, LINK_SIZE)
         data += serialise_int(self.record, 1)
         return data
     def derialise(data):
+        defaults, data = derialise_list_int(data, ARG_SIZE_SIZE, REG_SIZE)
         env_size, data = derialise_int(data, ENV_SIZE_SIZE)
         tp_label, data = derialise_str(data, FUNC_ID_SIZE)
+        min_nargs, data = derialise_int(data, REG_SIZE)
+        max_nargs, data = derialise_int(data, REG_SIZE)
         name, data = derialise_str(data, NAME_SIZE)
-        nargs, data = derialise_int(data, REG_SIZE)
         link, data = derialise_int(data, LINK_SIZE)
         record, data = derialise_int(data, 1)
         assert 0 <= record <= 1, "ValueError"
-        return BLiteralFunc(env_size, tp_label, nargs, name, link,
-                            bool(record)), \
-               data
+        literal = BLiteralFunc(env_size, tp_label, min_nargs, max_nargs, name,
+                               link, defaults, bool(record))
+        return literal, data
 
 class BLiteralClass(BLiteralHolder):
     _immutable_fields_ = ["bases", "name"]
@@ -664,6 +687,12 @@ class BDotList(Bast):
 def reg_to_str(reg):
     return u"reg[" + int_to_str(reg) + u"]"
 
+def regs_to_str(array):
+    strings = [u""]*len(array)
+    for i in range(len(array)):
+        strings[i] = reg_to_str(array[i])
+    return u",".join(strings)
+
 def env_list_to_str(name, link):
     if link == 0:
         return u"nameidx[" + int_to_str(name) + u"]"
@@ -684,9 +713,8 @@ def bytecode_list_to_str(bytecodes, mini=False):
         elif isinstance(bt, BCall):
             output += tab + reg_to_str(bt.regs[0]) + u":=" + \
                       reg_to_str(bt.regs[1]) + u"(" + \
-                      u",".join([reg_to_str(i) for i in bt.regs[2:]]) + \
-                      u") clear=[" + \
-                      u",".join([reg_to_str(i) for i in bt.clear]) + u"]"
+                      regs_to_str(bt.regs[2:]) + u") clear=[" + \
+                      regs_to_str(bt.clear) + u"]"
         elif isinstance(bt, BStoreLoadDict):
             if bt.storing:
                 output += tab + u"name[" + bt.name + u"]:=" + \
@@ -711,7 +739,10 @@ def bytecode_list_to_str(bytecodes, mini=False):
                 assert isinstance(bt_literal, BLiteralFunc), "TypeError"
                 literal = t + u"[" + bt_literal.tp_label + u", " + \
                           u"env_size=" + int_to_str(bt_literal.env_size) + \
-                          u",nargs=" + int_to_str(bt_literal.nargs) + u"]"
+                          u",nargs=[" + int_to_str(bt_literal.min_nargs) + \
+                          u"," + int_to_str(bt_literal.max_nargs) + \
+                          u"],defaults=[" + regs_to_str(bt_literal.defaults) + \
+                          u"]]"
             elif bt.type == BLiteral.NONE_T:
                 literal = u"none"
             elif bt.type == BLiteral.UNDEFINED_T:
@@ -729,12 +760,8 @@ def bytecode_list_to_str(bytecodes, mini=False):
                 literal = u"new_class[" + bt_literal.name
                 # literal += u", env_size=" + int_to_str(bt_literal.env_size)
                 if len(bt_literal.bases) != 0:
-                    literal += u", [bases="
-                    for i in range(len(bt_literal.bases)):
-                        literal += reg_to_str(bt_literal.bases[i])
-                        if i != len(bt_literal.bases)-1:
-                            literal += u","
-                    literal += u"]"
+                    literal += u", [bases=" + regs_to_str(bt_literal.bases) + \
+                               u"]"
                 literal += u"]"
             else:
                 literal = u"unknown"
@@ -742,8 +769,7 @@ def bytecode_list_to_str(bytecodes, mini=False):
         elif isinstance(bt, BJump):
             output += tab + u"jumpif(" + (u"!" if bt.negated else u"") + \
                       reg_to_str(bt.condition_reg) + u")=>" + bt.label + \
-                      u" clear=[" + \
-                      u",".join([reg_to_str(i) for i in bt.clear]) + u"]"
+                      u" clear=[" + regs_to_str(bt.clear) + u"]"
         elif isinstance(bt, BRegMove):
             output += tab + reg_to_str(bt.reg1) + u":=" + reg_to_str(bt.reg2)
         elif isinstance(bt, BRet):
@@ -896,8 +922,8 @@ Not implemented:
 BUILTIN_OPS = ["+", "-", "*", "%", "//", "==", "!=", "<", ">", "<=", ">=", "/",
                "int", "str", "bool", "list", "float", "isinstance", "cmd_args",
                "&", "|", "<<", ">>",
-               "or", "not", ".", ".=", "idx", "simple_idx", "simple_idx=", "[]",
-               "is"]
+               "or", "not", ".", ".=", "$idx", "$simple_idx", "$simple_idx=",
+               "[]", "is"]
 BUILTIN_MODULES = ["math", "io"]
 
 # "__class__" was in BULTIN_HELPERS but class scope no longer gets an env
@@ -905,23 +931,26 @@ CLS_REG = 2
 
 SPECIAL_ATTRS = [
                   u"__init__",
-                  u"round",  # math.round(int|float, int) -> int|float
-                  u"sqrt",   # math.sqrt(float) -> float
-                  u"sin",    # math.sin(float) -> float
-                  u"cos",    # math.cos(float) -> float
-                  u"tan",    # math.tan(float) -> float
-                  u"pow",    # math.pow(float, float) -> float
-                  u"PI",     # math.PI : float
-                  u"ε",      # math.ε : float
-                  u"append", # <list>.append(object) -> none
-                  u"len",    # <list|str>.len() -> int
-                  u"print",  # io.print(str) -> none
-                  u"open",   # io.open(str, str) -> FileObj
-                  u"close",  # FileObj.close() -> none
-                  u"read",   # FileObj.read(int) -> str
-                  u"write",  # FileObj.write(str) -> none
-                  u"join",   # <str>.join(list) -> str
-                  u"index",  # <list|str>.find(object|str) -> int
+                  u"str_round", # math.round(int|float, int) -> str
+                  u"round",     # math.round(int|float, int) -> int|float
+                  u"sqrt",      # math.sqrt(float) -> float
+                  u"sin",       # math.sin(float) -> float
+                  u"cos",       # math.cos(float) -> float
+                  u"tan",       # math.tan(float) -> float
+                  u"pow",       # math.pow(float, float) -> float
+                  u"PI",        # math.PI : float
+                  u"ε",         # math.ε : float
+                  u"append",    # <list>.append(object) -> none
+                  u"len",       # <list|str>.len() -> int
+                  u"print",     # io.print(str) -> none
+                  u"open",      # io.open(str, str) -> FileObj
+                  u"close",     # FileObj.close() -> none
+                  u"read",      # FileObj.read(int) -> str
+                  u"write",     # FileObj.write(str) -> none
+                  u"join",      # <str>.join(list) -> str
+                  u"index",     # <list|str>.find(object|str) -> int
+                  u"split",     # <str>.split(str, int?) -> list[str]
+                  u"replace",   # <str>.replace(str, str) -> str
                 ]
 BUILTIN_MODULE_SIDES = ["print", "open", "close", "read", "write", "append"]
 CONSTRUCTOR_IDX = 0
@@ -952,6 +981,7 @@ assert len(BUILTINS) == len(REAL_BUILTINS), "Invalid"
 SPECIAL_ATTRS = hint(SPECIAL_ATTRS, promote=True)
 
 
+STR_ROUND_IDX = const(get_special_attr_idx(u"str_round"))
 ROUND_IDX = const(get_special_attr_idx(u"round"))
 SQRT_IDX = const(get_special_attr_idx(u"sqrt"))
 SIN_IDX = const(get_special_attr_idx(u"sin"))
@@ -969,6 +999,8 @@ APPEND_IDX = const(get_special_attr_idx(u"append"))
 LEN_IDX = const(get_special_attr_idx(u"len"))
 JOIN_IDX = const(get_special_attr_idx(u"join"))
 INDEX_IDX = const(get_special_attr_idx(u"index"))
+SPLIT_IDX = const(get_special_attr_idx(u"split"))
+REPLACE_IDX = const(get_special_attr_idx(u"replace"))
 
 INT_IDX = const(get_special_env_idx(u"int"))
 STR_IDX = const(get_special_env_idx(u"str"))

@@ -1,0 +1,57 @@
+# The Computer Language Benchmarks Game
+# https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+#
+# contributed by Jacob Lee, Steven Bethard, et al
+# 2to3, fixed by Daniele Varrazzo
+# modified by Daniel Nanz
+
+# Converted to use str instead of bytes
+# Converted to lizzzard by TheLizzard
+
+
+TABLE = ["ACBDGHKMNSRUTWVYacbdghkmnsrutwvy",
+         "TGVHCDMKNSYAAWBRTGVHCDMKNSYAAWBR"]
+
+str_translate = func(string) {
+    output = []
+    i = 0
+    while (i < string.len()) {
+        output.append(TABLE[1][TABLE[0].index(string[i])])
+        i += 1
+    }
+    return "".join(output)
+}
+
+_print_seq = func(seq, i=0) {
+    i60 = 60 * i
+    if (i60 >= seq.len()) { return }
+    if (i60%100_000 == 0) {
+        io.print(seq[i60:i60+60])
+    }
+    _print_seq(seq, i+1)
+}
+
+show = func(seqs, i=0) {
+    if (i == seqs.len()) { return }
+    seq = seqs[i]
+    header, seq = seq[:seq.index("\n")], seq[seq.index("\n")+1:]
+    new_seq = str_translate(seq.replace("\n",""))[::-1]
+    io.print(">" + header)
+    _print_seq(new_seq)
+    if (i < seqs.len()) { show(seqs, i+1) }
+}
+
+CHUNK_SIZE = 1024*1024 # 1 MB
+main = func(file) {
+    data = []
+    while true {
+        chunk = file.read(CHUNK_SIZE)
+        data.append(chunk)
+        if (chunk.len() < CHUNK_SIZE) { break }
+    }
+    show("".join(data).split(">")[1:])
+}
+
+file = io.open(cmd_args[0], "r")
+main(file)
+file.close()

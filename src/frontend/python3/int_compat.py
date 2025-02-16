@@ -8,7 +8,7 @@ if PYTHON == 2:
     def int_to_bytes(integer, size):
         assert isinstance(integer, int), "TypeError"
         assert isinstance(size, int), "TypeError"
-        assert 0 <= integer < (1<<(size*8)), "ValueError"
+        assert 0 <= integer < (1<<(size<<3)), "ValueError"
         assert size > 0, "ValueError"
         result = bytearray()
         for _ in range(size):
@@ -20,7 +20,7 @@ else:
     def int_to_bytes(integer, size):
         assert isinstance(integer, int), "TypeError"
         assert isinstance(size, int), "TypeError"
-        assert 0 <= integer < (1<<(size*8)), "ValueError"
+        assert 0 <= integer < (1<<(size<<3)), "ValueError"
         assert size > 0, "ValueError"
         return integer.to_bytes(size, "big")
 

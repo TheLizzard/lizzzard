@@ -1,0 +1,72 @@
+# The Computer Language Benchmarks Game
+# https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+#
+# Contributed by Sebastien Loisel
+# Fixed by Isaac Gouy
+# Sped up by Josh Goldfoot
+# Dirtily sped up by Simon Descarpentries
+# Used list comprehension by Vadim Zelenin
+# 2to3
+
+# Simplified by TheLizzard (added testing of global variable loading speed)
+# Converted to lizzzard by TheLizzard
+
+
+eval_a = func(i, j) {
+    ij = i+j
+    return 1 / (ij*(ij+1)/2 + i + 1)
+}
+
+
+_eval_a_times_u = func(u, i, j=0) {
+    if (j == u.len()) { return 0 }
+    return _eval_a_times_u(u, i, j+1) + eval_a(i,j)*u[j]
+}
+
+eval_a_times_u = func(u, i=0) {
+    if (i == u.len()) { return [0] * u.len() }
+    result = eval_a_times_u(u, i+1)
+    result[i] = _eval_a_times_u(u, i)
+    return result
+}
+
+
+_eval_at_times_u = func(u, i, j=0) {
+    if (j == u.len()) { return 0 }
+    return _eval_at_times_u(u, i, j+1) + eval_a(j,i)*u[j]
+}
+
+eval_at_times_u = func(u, i=0) {
+    if (i == u.len()) { return [0] * u.len() }
+    result = eval_at_times_u(u, i+1)
+    result[i] = _eval_at_times_u(u, i)
+    return result
+}
+
+eval_ata_times_u = func(u) {
+    return eval_at_times_u(eval_a_times_u(u))
+}
+
+
+_main = func(u, v=none, i=0) {
+    if (i == 10) { return [u, v] }
+    v = eval_ata_times_u(u)
+    u = eval_ata_times_u(v)
+    return _main(u, v, i+1)
+}
+
+__main = func(u, v, vbv=0, vv=0, i=0) {
+    if (i == u.len()) { return vbv, vv }
+    vbv += u[i] * v[i]
+    vv  += v[i] * v[i]
+    return __main(u, v, vbv, vv, i+1)
+}
+
+main = func(n) {
+    u, v = _main([1]*n)
+    vbv, vv = __main(u, v)
+    io.print(math.str_round(math.sqrt(vbv/vv), 9))
+}
+
+n = int(cmd_args[0])
+main(n)

@@ -386,6 +386,11 @@ class Tokeniser:
                 self.under.read(1)
             else:
                 return self.read_newline_into_buffer()
+        elif token == "\\":
+            if self.under.peek(2) == "\\\n":
+                self.under.read(2)
+            else:
+                self._throw(f"[LEXER] unknown {token=!r}", stamp)
         else:
             self._throw(f"[LEXER] unknown {token=!r}", stamp)
         return [] if (ret is None) else [ret]

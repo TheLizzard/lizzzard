@@ -1,0 +1,37 @@
+# Base:
+#   https://github.com/hanabi1224/Programming-Language-Benchmarks/blob/main/bench/algorithm/coro-prime-sieve/1.py
+# Modified by TheLizzard
+# Converted to lizzzard by TheLizzard
+
+filter = func(generator, prime) {
+    new_generator = func() {
+        number = generator()
+        if (number % prime == 0) { return next() }
+        return number
+    }
+    return new_generator
+}
+
+base_generator = func() {
+    i = 1
+    next = func() {
+        nonlocal i
+        i += 1
+        return i
+    }
+    return next
+}
+
+_main = func(generator, i) {
+    prime = generator()
+    return prime if (i == 1) else _main(filter(generator, prime), i-1)
+}
+
+main = func(n) {
+    generator = base_generator()
+    last_prime = _main(generator, n)
+    io.print(last_prime)
+}
+
+n = int(cmd_args[0])
+main(n)

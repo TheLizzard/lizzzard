@@ -335,6 +335,8 @@ class State:
                         if scope is None:
                             raise NotImplementedError("Impossible")
                     link += self.class_state
+                if scope.master is None:
+                    link:int = -1
                 idx:int = scope.full_env.index(bt.name)
                 bt:Bast = BStoreLoadList(bt.err, link, idx, bt.reg, bt.storing)
             fransformed_block.append(bt)
@@ -467,7 +469,7 @@ class ByteCoder:
                     args.append(self._convert(exp, state))
                 with state.get_free_reg_wrapper() as idx_reg:
                     state.append_bast(BStoreLoadDict(op_to_err(target),
-                                                     "simple_idx=",
+                                                     "$simple_idx=",
                                                      idx_reg, False))
                     state.append_bast(BCall(op_to_err(target),
                                             [0,idx_reg]+args+[reg],
@@ -485,7 +487,7 @@ class ByteCoder:
             elif target.op == "·,·":
                 with state.get_free_reg_wrapper() as idx_reg:
                     state.append_bast(BStoreLoadDict(op_to_err(target),
-                                                     "simple_idx",
+                                                     "$simple_idx",
                                                      idx_reg, False))
                     for i, subtarget in enumerate(target.args):
                         subvalue:int = state.get_free_reg()
@@ -614,7 +616,11 @@ class ByteCoder:
             else:
                 res_reg:int = state.get_free_reg()
                 used_regs:list[int] = [0]
-                if cmd.op == "call":
+                if cmd.op in RENAME_BUILTIN_FUNCS:
+                    op = cmd.op.name_as(RENAME_BUILTIN_FUNCS[cmd.op])
+                else:
+                    op = cmd.op
+                if op == "call":
                     for arg in cmd.args[1:]:
                         reg:int = self._convert(arg, state)
                         used_regs.append(reg)
@@ -625,7 +631,7 @@ class ByteCoder:
                         reg:int = self._convert(arg, state)
                         used_regs.append(reg)
                     func:int = state.get_free_reg()
-                    state.assert_read(Var(cmd.op), cmd.op, func)
+                    state.assert_read(Var(op), op, func)
                     used_regs[0] = func
                 state.append_bast(BCall(op_to_err(cmd), [res_reg]+used_regs,
                                         clear=used_regs))
@@ -696,12 +702,25 @@ class ByteCoder:
             #   res_reg := func_label
             res_reg:int = state.get_free_reg()
             link:int = state.get_class_chain()
+            defaults:list[int] = []
+            for arg in cmd.args:
+                if arg.default is None:
+                    if defaults:
+                        arg.throw("Argument with no default follows one " \
+                                  "with default")
+                else:
+                    defaults.append(self._convert(arg.default, state))
+            max_args:int = len(cmd.args)
+            min_args:int = max_args - len(defaults)
             record:bool = (name != CONSTRUCTOR_NAME) and state.is_global_scope()
-            func_literal:BLiteralFunc = BLiteralFunc(0, label, len(cmd.args),
-                                                     name, link, record=record)
+            func_literal:BLiteralFunc = BLiteralFunc(0, label, min_args,
+                                                     max_args, name, link,
+                                                     defaults, record=record)
             link:int = state.get_class_chain()
             state.append_bast(BLiteral(op_to_err(cmd), res_reg, func_literal,
                                        BLiteral.FUNC_T))
+            for arg in defaults:
+                state.free_reg(arg)
             is_constructor:bool = state.class_state and \
                                   (name == CONSTRUCTOR_NAME)
             def todo() -> None:
@@ -716,7 +735,7 @@ class ByteCoder:
                 for i, arg in enumerate(cmd.args, start=2):
                     token:Token = arg.identifier
                     nstate.write_env(token)
-                    nstate.append_bast(BStoreLoadDict(EMPTY_ERR,
+                    nstate.append_bast(BStoreLoadDict(op_to_err(arg),
                                                       token.token, i, True))
                 for i, subcmd in enumerate(cmd.body):
                     tmp_reg:int = self._convert(subcmd, nstate)
@@ -728,9 +747,10 @@ class ByteCoder:
                 if not nstate.must_ret: # return `none` or `self`
                     if is_constructor:
                         reg:int = nstate.get_free_reg()
-                        arg_name:str = cmd.args[0].identifier.token
-                        nstate.append_bast(BStoreLoadDict(EMPTY_ERR,
-                                                          arg_name, reg, False))
+                        arg:Var = cmd.args[0]
+                        nstate.append_bast(BStoreLoadDict(op_to_err(arg),
+                                                          arg.identifier.token,
+                                                          reg, False))
                     else:
                         reg:int = nstate.get_none_reg()
                     nstate.append_bast(BRet(EMPTY_ERR, reg))
@@ -802,8 +822,8 @@ class ByteCoder:
                 bases.append(self._convert(base, state))
             link:int = state.get_class_chain()
             cls_literal:BLiteralClass = BLiteralClass(bases, name)
-            cls_init_lit:BLiteralFunc = BLiteralFunc(0, label, 1, label, link,
-                                                     record=False)
+            cls_init_lit:BLiteralFunc = BLiteralFunc(0, label, 1, 1, label,
+                                                     link, [], record=False)
             state.append_bast(BLiteral(op_to_err(cmd), res_reg, cls_literal,
                                        BLiteral.CLASS_T))
             state.append_bast(BLiteral(op_to_err(cmd), cls_init, cls_init_lit,
@@ -845,6 +865,14 @@ def op_to_err(op:Cmd) -> ErrorIdx:
     err = ErrorIdx(token_to_idx_pair(get_first_token(op), last=False),
                     token_to_idx_pair(get_last_token(op), last=True))
     return err
+
+
+RENAME_BUILTIN_FUNCS:dict[str:str] = {
+                                       "idx": "$idx",
+                                       "idx=": "$idx=",
+                                       "simple_idx": "$simple_idx",
+                                       "simple_idx=": "$simple_idx=",
+                                     }
 
 
 if __name__ == "__main__":
@@ -1083,6 +1111,92 @@ io.print(3, "\t", int(math.round(-5,-1)==-10), int(math.round(-4,-1)==0),
                   int(math.round(4,-1)==0))
 
 
+io.print("########## Round str #########")
+io.print(5, "\t", int(math.str_round(7135.8642,-6)=="0"),
+                  int(math.str_round(7135.8642,-5)=="0"),
+                  int(math.str_round(7135.8642,-4)=="10000"),
+                  int(math.str_round(7135.8642,-3)=="7000"),
+                  int(math.str_round(7135.8642,-2)=="7100"))
+io.print(5, "\t", int(math.str_round(7135.8642,-1)=="7140"),
+                  int(math.str_round(7135.8642,0)=="7136"),
+                  int(math.str_round(7135.8642,1)=="7135.9"),
+                  int(math.str_round(7135.8642,2)=="7135.86"),
+                  int(math.str_round(7135.8642,3)=="7135.864"))
+io.print(5, "\t", int(math.str_round(7135.8642,4)=="7135.8642"),
+                  int(math.str_round(7135.8642,5)=="7135.86420"),
+                  int(math.str_round(7135.8642,6)=="7135.864200"),
+                  int(math.str_round(0.0999,-5)=="0"),
+                  int(math.str_round(0.0999,-4)=="0"))
+io.print(5, "\t", int(math.str_round(0.0999,-3)=="0"),
+                  int(math.str_round(0.0999,-2)=="0"),
+                  int(math.str_round(0.0999,-1)=="0"),
+                  int(math.str_round(0.0999,0)=="0"),
+                  int(math.str_round(0.0999,1)=="0.1"))
+io.print(5, "\t", int(math.str_round(0.0999,2)=="0.10"),
+                  int(math.str_round(0.0999,3)=="0.100"),
+                  int(math.str_round(0.0999,4)=="0.0999"),
+                  int(math.str_round(0.0999,5)=="0.09990"),
+                  int(math.str_round(0.0999,6)=="0.099900"))
+io.print(5, "\t", int(math.str_round(5,-1)=="10"),
+                  int(math.str_round(0.5,0)=="1"),
+                  int(math.str_round(0.05,1)=="0.1"),
+                  int(math.str_round(0.005,2)=="0.01"),
+                  int(math.str_round(true,-2)=="0"))
+io.print(5, "\t", int(math.str_round(true,-1)=="0"),
+                  int(math.str_round(true,0)=="1"),
+                  int(math.str_round(true,1)=="1.0"),
+                  int(math.str_round(true,2)=="1.00"),
+                  int(math.str_round(true,3)=="1.000"))
+io.print(5, "\t", int(math.str_round(-7135.8642,-6)=="0"),
+                  int(math.str_round(-7135.8642,-5)=="0"),
+                  int(math.str_round(-7135.8642,-4)=="-10000"),
+                  int(math.str_round(-7135.8642,-3)=="-7000"),
+                  int(math.str_round(-7135.8642,-2)=="-7100"))
+io.print(5, "\t", int(math.str_round(-7135.8642,-1)=="-7140"),
+                  int(math.str_round(-7135.8642,0)=="-7136"),
+                  int(math.str_round(-7135.8642,1)=="-7135.9"),
+                  int(math.str_round(-7135.8642,2)=="-7135.86"),
+                  int(math.str_round(-7135.8642,3)=="-7135.864"))
+io.print(5, "\t", int(math.str_round(-7135.8642,4)=="-7135.8642"),
+                  int(math.str_round(-7135.8642,5)=="-7135.86420"),
+                  int(math.str_round(-7135.8642,6)=="-7135.864200"),
+                  int(math.str_round(-0.0999,-5)=="0"),
+                  int(math.str_round(-0.0999,-4)=="0"))
+io.print(5, "\t", int(math.str_round(-0.0999,-3)=="0"),
+                  int(math.str_round(-0.0999,-2)=="0"),
+                  int(math.str_round(-0.0999,-1)=="0"),
+                  int(math.str_round(-0.0999,0)=="0"),
+                  int(math.str_round(-0.0999,1)=="-0.1"))
+io.print(5, "\t", int(math.str_round(-0.0999,2)=="-0.10"),
+                  int(math.str_round(-0.0999,3)=="-0.100"),
+                  int(math.str_round(-0.0999,4)=="-0.0999"),
+                  int(math.str_round(-0.0999,5)=="-0.09990"),
+                  int(math.str_round(-0.0999,6)=="-0.099900"))
+io.print(5, "\t", int(math.str_round(-5,-1)=="-10"),
+                  int(math.str_round(-0.5,0)=="-1"),
+                  int(math.str_round(-0.05,1)=="-0.1"),
+                  int(math.str_round(-0.005,2)=="-0.01"),
+                  int(math.str_round(-true,-2)=="0"))
+io.print(5, "\t", int(math.str_round(-true,-1)=="0"),
+                  int(math.str_round(-true,0)=="-1"),
+                  int(math.str_round(-true,1)=="-1.0"),
+                  int(math.str_round(-true,2)=="-1.00"),
+                  int(math.str_round(-true,3)=="-1.000"))
+
+
+io.print("###### Default func args #####")
+f = func(a=5, b=8) { a+b }
+io.print(3, "\t", f(0,0)+1, f(0)-7, f()-12)
+
+
+io.print("#### String split/replace ####")
+io.print(2, "\t", int("abc\"deafa".split("a")==["","bc\"de","f",""]),
+                  int("abc\"deafa".split("a", 2)==["","bc\"de","fa"]))
+io.print(3, "\t", int("acbcdecf".replace("c","#")=="a#b#de#f"),
+                  int("acbcdecf".replace("c","")=="abdef"),
+                  int("acbcdecf".replace("c","", 1)=="abcdecf"))
+
+
 io.print("These should be classes:\t\t", classes)
 io.print("These should be instances:\t\t", objects)
 io.print("These should be unbounded functions:\t", unbounded_funcs)
@@ -1265,10 +1379,10 @@ while (a.x < 1000) {
 }
 """[1:-1], False
 
-    TEST13 = """
+    TEST13 = r"""
 """[1:-1], False
 
-    if len(argv) == 1:
+    if len(argv) == 13:
         with open("code-examples/raytracer.lizz", "r") as file:
             TEST8 = (file.read(), False)
 

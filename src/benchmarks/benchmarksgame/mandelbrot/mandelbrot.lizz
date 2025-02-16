@@ -1,0 +1,66 @@
+# The Computer Language Benchmarks Game
+# https://salsa.debian.org/benchmarksgame-team/benchmarksgame/
+#
+#     line-by-line from Greg Buchholz's C program
+
+# Simplified and removed most IO - TheLizzard
+
+
+LIMIT = 2
+
+get_interations = func(cr,ci, zr=0,zi=0, tr=0,ti=0, count=0) {
+    if (count == 50) { return count }
+    zi = 2*zr*zi + ci
+    zr = tr - ti + cr
+    tr = zr * zr
+    ti = zi * zi
+    if (tr+ti > LIMIT*LIMIT) {
+        return count
+    }
+    return get_interations(cr,ci, zr,zi, tr,ti, count+1)
+}
+
+fill_row = func(img, y, n, x=0) {
+    if (x == n) { return }
+    img[y*n+x] = get_interations(2*x/n-1.5, 2*y/n-1)
+    fill_row(img, y, n, x+1)
+}
+
+fill = func(img, n, y=0) {
+    if (y == n) { return }
+    fill_row(img, y, n)
+    fill(img, n, y+1)
+}
+
+main = func(n) {
+    img = [0]*n*n
+    fill(img, n)
+    return hash_img(img, n, n)
+}
+
+
+hash_img = func(img, width, height) {
+    hash = 0
+    y = 0
+    while (y < height) {
+        x = 0
+        while (x < width) {
+            x_weight = 1 - math.pow(x-width/2, 2) / width
+            y_weight = 1 - math.pow(y-height/2, 2) / height
+            hash += img[y*width+x] * x_weight * y_weight
+            x += 1
+        }
+        y += 1
+    }
+    return hash/math.pow(width*height, 2)
+}
+
+assert = func(boolean, msg) {
+    if (not boolean) {
+        io.print("ERROR:", msg)
+        1/0
+    }
+}
+
+n = int(cmd_args[0])
+io.print(math.str_round(main(n), 8))

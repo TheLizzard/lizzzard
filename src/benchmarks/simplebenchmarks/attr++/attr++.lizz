@@ -1,0 +1,11 @@
+A = class {
+    X = 0
+}
+
+n = int(cmd_args[0])
+
+while (A.X < n) {
+    A.X += 1
+}
+
+io.print(A.X)

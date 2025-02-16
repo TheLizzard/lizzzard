@@ -1,0 +1,8 @@
+n = int(cmd_args[0])
+
+i = 0
+while (i < n) {
+    i += 1
+}
+
+io.print(i)

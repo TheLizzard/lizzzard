@@ -181,10 +181,20 @@ src/code-examples/raytracer/*
 src/code-examples/*.ppm
 src/code-examples/pypy*
 
-# My files
+# My shorcut files
 log/clear_log.run
 log/pypy.run
 log/run.run
 
-# Benchmark clizz files
+# Compiled .lizz files, data files and data generators for benchmarks
+src/benchmarks/benchmarksgame/reverse-complement/data.fasta
+src/benchmarks/benchmarksgame/reverse-complement/gen.py
 src/benchmarks/*/*/*.clizz
+
+# Pypy for bechmark
+src/benchmarks/pypy
+!src/benchmarks/pypy/version.txt
+
+# Benchmark temporary reports
+src/benchmarks/reports
+src/benchmarks/transform-jit.py
