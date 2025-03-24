@@ -833,18 +833,16 @@ class ByteCoder:
             state.mark_as_free_reg(cls_init)
             for base in bases:
                 state.free_reg(base)
-            def todo() -> None:
-                nstate:State = state.copy_for_class()
-                nstate.append_bast(Bable(label))
-                cls_obj_reg:int = nstate.get_free_reg()
-                assert cls_obj_reg == CLS_REG, "InternalError"
-                for assignment in cmd.body:
-                    self._convert(assignment, nstate)
-                nstate.free_reg(cls_obj_reg)
-                nstate.append_bast(BRet(op_to_err(cmd), 0))
-                nstate.fransform_class()
-            # self._todo.append(todo)
-            todo()
+            # Class body:
+            nstate:State = state.copy_for_class()
+            nstate.append_bast(Bable(label))
+            cls_obj_reg:int = nstate.get_free_reg()
+            assert cls_obj_reg == CLS_REG, "InternalError"
+            for assignment in cmd.body:
+                self._convert(assignment, nstate)
+            nstate.free_reg(cls_obj_reg)
+            nstate.append_bast(BRet(op_to_err(cmd), 0))
+            nstate.fransform_class()
 
         else:
             raise NotImplementedError(f"Not implemented {cmd!r}")

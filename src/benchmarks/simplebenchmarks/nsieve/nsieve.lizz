@@ -1,0 +1,20 @@
+main = func(n) {
+    flags = [true]*n
+    count = 0
+    i = 2
+    while (i < n) {
+        if flags[i] {
+            j = i << 1
+            while (j < n) {
+                flags[j] = false
+                j += i
+            }
+            count += 1
+        }
+        i += 1
+    }
+    io.print("Primes up to " + str(n) + " " + str(count))
+}
+
+n = int(cmd_args[0])
+main(n)

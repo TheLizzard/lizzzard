@@ -551,11 +551,11 @@ class Tokeniser:
     @staticmethod
     def _hex_to_int(string:str) -> int:
         output:int = 0
-        for i, char in enumerate(string):
+        for i, char in enumerate(string.lower()):
             output *= 16
             if char in "0123456789":
                 output += ord(char)-48
-            elif char.lower() in "abcdefg":
+            elif char in "abcdefg":
                 output += ord(char)-87
             else:
                 raise ValueError()

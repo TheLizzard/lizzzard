@@ -6,7 +6,7 @@
 filter = func(generator, prime) {
     new_generator = func() {
         number = generator()
-        if (number % prime == 0) { return next() }
+        if (number % prime == 0) { return new_generator() }
         return number
     }
     return new_generator

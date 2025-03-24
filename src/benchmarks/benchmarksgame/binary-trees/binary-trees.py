@@ -41,7 +41,7 @@ def main(n):
         sum = 0
         for _ in range(iterations):
             sum += count(depth)
-    print("%i\t trees of depth %i\t check:" % (iterations, depth), sum)
+        print("%i\t trees of depth %i\t check: %i" % (iterations, depth, sum))
 
     c = long_lived_tree.node_count()
     long_lived_tree.clear()

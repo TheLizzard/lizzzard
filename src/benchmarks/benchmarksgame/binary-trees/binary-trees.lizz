@@ -4,15 +4,6 @@
 # contributed by Isaac Gouy
 
 
-range = func(start, stop, step, callback) {
-    i = start
-    while (i < stop) {
-        callback(i)
-        i += step
-    }
-}
-
-
 Tree = class {
     __init__ = func(this, left, right) {
         this.left = left
@@ -47,6 +38,22 @@ Tree = class {
 }
 
 
+__main = func(depth, iterations, i=0) {
+    if (i == iterations) { return 0 }
+    return count(depth) + __main(depth, iterations, i+1)
+}
+
+
+_main = func(min_depth, depth, max) {
+    if (depth >= max) { return 0 }
+    iterations = 1 << (max - depth + min_depth - 1)
+    sum = __main(depth, iterations)
+    io.print(str(iterations) + "\t trees of depth " + str(depth) + \
+             "\t check: " + str(sum))
+    return sum + _main(min_depth, depth+2, max)
+}
+
+
 main = func(n) {
     MIN_DEPTH = 4
     max_depth = (MIN_DEPTH + 2) if (MIN_DEPTH + 2 > n) else n
@@ -55,18 +62,7 @@ main = func(n) {
     stretch(stretch_depth)
     long_lived_tree = Tree.with_(max_depth)
 
-    iterations = _depth = sum = 0
-    range(MIN_DEPTH, stretch_depth, 2, func(depth) {
-        nonlocal iterations, _depth, sum
-        _depth = depth
-        iterations = 1 << (max_depth - depth + MIN_DEPTH)
-        sum = 0
-        range(0, iterations, 1, func(_) {
-            sum += count(depth)
-        })
-    })
-    io.print(str(iterations) + "\t trees of depth " + str(_depth) + "\t check:",
-             sum)
+    sum = _main(MIN_DEPTH, MIN_DEPTH, stretch_depth)
 
     c = long_lived_tree.node_count()
     long_lived_tree.clear()

@@ -888,7 +888,7 @@ TYPE_PRECEDENCE = [
                     [True,  "",     ["identifier"]],
                   ]
 MOD_ASSIGN_OPERATORS = []
-for op in ("+", "-", "*", "/", "//", "&", "^", "|", "<<", ">>"):
+for op in ("+", "-", "*", "**", "/", "//", "%", "&", "^", "|", "<<", ">>", "~"):
     MOD_ASSIGN_OPERATORS.append(op+"=")
 KEYWORDS = ["true", "false", "none", "return", "break", "continue", "for",
             "while", "if", "func", "else", "with", "except", "finally",

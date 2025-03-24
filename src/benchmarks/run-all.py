@@ -1,15 +1,19 @@
 from __future__ import annotations
+from os import path, environ, getcwd, chdir, remove
 from subprocess import Popen, DEVNULL, PIPE
 from sys import executable as py_executable
 from tempfile import TemporaryDirectory
-from os import path, environ, getcwd
 from time import perf_counter
+import resource
 
 LIZZZARD_JIT_LOG_PATH:str = "../../jit-lizzzard.log"
 PYPY_JIT_LOG_PATH:str = "../../jit-pypy.log"
 LIZZ_EXECUTABLE:tuple[str] = ("../../../frontend/lizzzard",)
 pypy_base:str = path.join(path.dirname(__file__), "pypy")
 pypy_executable:str = path.join(pypy_base, "bin", "pypy3.11")
+
+pycket_executable:str = "./pycket-c"
+plthome:str = path.abspath(path.join(getcwd(), "../../../../pycket"))
 
 PYPY_ADD_ENV = {
                  "LD_LIBRARY_PATH": pypy_base,
@@ -22,6 +26,10 @@ class Generate:
         self.data_file, self.args = data_file, args
 class StopBenchmark(Exception): ...
 
+def set_unlimited_stack() -> None:
+    resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY,
+                                               resource.RLIM_INFINITY))
+
 
 TEST_REPEAT:int = 1
 BENCHMARKS = {
@@ -32,8 +40,8 @@ BENCHMARKS = {
            "benchmarksgame":
                    [
                      # ("fasta", (2500000,)),
-                     # ("fannkuch", (10,)),
-                     # ("binary-trees", (17,)),
+                     ("fannkuch", (10,)),
+                     # ("binary-trees", (15,)),
                      # ("n-body", (500000,)),
                      # ("mandelbrot", (1000,)),
                      # ("spectral-norm", (1000,)),
@@ -44,10 +52,11 @@ BENCHMARKS = {
                      # ("fib1", (37,)),
                      # ("fib2", (37,)),
                      # ("while++", (100000000,)),
-                     # ("rec++", (10000000,)),
+                     # ("rec++", (1000000,)),
                      # ("attr++", (100000000,)),
                      # ("raytracer", ()),
-                     ("prime-sieve", (20000,)),
+                     # ("prime-sieve", (2000,)),
+                     # ("nsieve", ("5000000",)),
                    ],
              }
 
@@ -59,6 +68,11 @@ _expected:str = {}
 
 
 def main() -> None:
+    # ulimit is a shell built-in... This was obviously not going to work :/
+    # def log_fail_ulimit_stack(reason:str, text:str="") -> None:
+    #     print(f"[ERROR]: Failed to remove stack limits {reason=}")
+    # _run("ulimit", "-s", "unlimited", onsuccess=lambda f:None,
+    #      onfail=log_fail_ulimit_stack)
     # Run each benchmark 3 times (make the median)
     for benchmark_name, benchmarks in BENCHMARKS.items():
         if not benchmarks: continue
@@ -76,6 +90,9 @@ def main() -> None:
             run_py_benchmark(benchmark_name, benchmark, args)
             run_pypy_benchmark(benchmark_name, benchmark, args)
             run_lizz_benchmark(benchmark_name, benchmark, args)
+            run_ocaml_benchmark(benchmark_name, benchmark, args)
+            run_ocamlc_benchmark(benchmark_name, benchmark, args)
+            run_pycket_benchmark(benchmark_name, benchmark, args)
             run_c_benchmark(benchmark_name, benchmark, args)
 
 def generate_data_file(benchmark_name:str, test_name:str, gen:Generate) -> None:
@@ -103,6 +120,7 @@ def run_lizz_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     compiled_file:str = filename(benchmark_name, test_name, "clizz")
     run(py_executable, "../bytecoder.py", src_file, onsuccess=_run,
         onfail=print_fail(benchmark_name, test_name, "lizz", "COMPILE"))
+    remove(compiled_file)
 
 def run_py_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     return _run_py_benchmark(py_executable, benchmark_name, test_name, args,
@@ -125,6 +143,45 @@ def _run_py_benchmark(executable:str, benchmark_name:str, test_name:str,
 
 def run_c_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     ...
+
+def run_ocamlc_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
+    with TemporaryDirectory() as folder:
+        compiled_file:str = f"{folder}/exec"
+        src_file:str = filename(benchmark_name, test_name, "ml")
+        if not path.exists(src_file): return
+        def _run(*_:tuple[object]) -> None:
+            if not path.exists(compiled_file):
+                print_fail(benchmark_name, test_name, "ocamlc", "COMPILE")()
+            onsucc = print_test_success(benchmark_name, test_name, "ocamlc")
+            onfail = print_fail(benchmark_name, test_name, "ocamlc", "RUN")
+            run(compiled_file, *args, onsuccess=onsucc, onfail=onfail,
+                chk_expected=(benchmark_name,test_name),
+                cwd=path.dirname(src_file))
+        run("ocamlopt", "-o", compiled_file, "-O3", src_file,
+            onfail=_run, onsuccess=_run, cwd=folder)
+    remove(filename(benchmark_name, test_name, "o"))
+    remove(filename(benchmark_name, test_name, "cmi"))
+    remove(filename(benchmark_name, test_name, "cmx"))
+
+def run_ocaml_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
+    src_file:str = filename(benchmark_name, test_name, "ml")
+    if not path.exists(src_file): return
+    run("ocaml", src_file, *args,
+        onsuccess=print_test_success(benchmark_name, test_name, "ocaml"),
+        onfail=print_fail(benchmark_name, test_name, "ocaml", "RUN"),
+        chk_expected=(benchmark_name,test_name), cwd=path.dirname(src_file))
+
+def run_pycket_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
+    cwd:str = getcwd()
+    src_file:str = filename(benchmark_name, test_name, "rkt")
+    if not path.exists(src_file): return
+    chdir(plthome)
+    run(pycket_executable, src_file, *args,
+        onsuccess=print_test_success(benchmark_name, test_name, "pycket"),
+        onfail=print_fail(benchmark_name, test_name, "pycket", "RUN"),
+        chk_expected=(benchmark_name,test_name), add_env={"PLTHOME":plthome},
+        cwd=plthome)
+    chdir(cwd)
 
 
 THIS:str = path.dirname(path.abspath(__file__))
@@ -182,7 +239,8 @@ def _run(*args:tuple[str], onsuccess:Function[float,None],
     skip_error:bool = False
     try:
         proc:Popen = Popen(args, shell=False, stdin=DEVNULL, stdout=PIPE,
-                           stderr=PIPE, env=environ|add_env, cwd=cwd or CWD)
+                           stderr=PIPE, env=environ|add_env, cwd=cwd or CWD,
+                           preexec_fn=set_unlimited_stack)
     except FileNotFoundError:
         onfail("FileNotFoundError")
         return None

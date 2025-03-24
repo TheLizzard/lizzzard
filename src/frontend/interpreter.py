@@ -1,3 +1,4 @@
+# coding=utf-8
 import signal
 import math
 import os
@@ -150,14 +151,13 @@ class ListValue(Value):
         self.array = []
 
 
-epsilon = 6e-8
 NONE = const(NoneValue())
 ZERO = const(IntValue(0))
 ONE = const(IntValue(1))
 FALSE = const(BoolValue(False))
 TRUE = const(BoolValue(True))
 PI = const(FloatValue(math.pi))
-EPSILON = const(FloatValue(epsilon))
+EPSILON = const(FloatValue(6e-8))
 EMPTY_OBJ = const(ObjectValue(ObjectInfo(98, u"*unreachable*", [], ObjectInfo(99, u"*unreachable*", [], None)), False))
 
 
@@ -205,7 +205,7 @@ def force_bool(val):
     if isinstance(val, BoolValue):
         return val.value
     if isinstance(val, FloatValue):
-        return not (-epsilon < val.value < epsilon)
+        return not (-EPSILON.value < val.value < EPSILON.value)
     return True
 
 @look_inside
@@ -680,9 +680,19 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 if bt.link == 0:
                     scope = env
                 elif bt.link == -1:
-                    scope = global_scope
+                    if ENV_IS_VIRTUALISABLE:
+                        if len(func.masters) == 0:
+                            scope = env
+                        else:
+                            scope = func.masters[0]
+                    else:
+                        scope = global_scope
                 else:
-                    scope = func.masters[const(len(func.masters))-bt.link]
+                    idx = const(len(func.masters))-bt.link
+                    if idx == 0:
+                        scope = global_scope
+                    else:
+                        scope = func.masters[idx]
                 # Store/Load variable
                 if bt.storing:
                     env_store(scope, bt.name+frame_size, env_load(env, bt.reg))
@@ -691,21 +701,37 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
 
             elif isinstance(bt, BDotList):
                 obj = env_load(env, bt.obj_reg)
+                # List
                 if isinstance(obj, ListValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX, APPEND_IDX, INDEX_IDX):
                         raise_name_error(u"Unknown attribute")
                     env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
+                # String
                 elif isinstance(obj, StrValue):
                     if bt.storing:
                         raise_name_error(u"cannot change builtin attribute")
                     if bt.attr not in (LEN_IDX, JOIN_IDX, INDEX_IDX, SPLIT_IDX, REPLACE_IDX):
                         raise_name_error(u"Unknown attribute")
                     env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
+                # Special
                 elif isinstance(obj, SpecialValue):
                     obj_type = const_str(obj.type)
-                    if obj_type == u"module":
+                    # math.ε can be modified
+                    if bt.storing:
+                        if (obj_type == u"module") and (obj.str_value == u"math") and (bt.attr == EPSILON_IDX):
+                            value = env_load(env, bt.reg)
+                            new_epsilon = 0.0
+                            if isinstance(value, FloatValue):
+                                new_epsilon = value.value
+                            elif isinstance(value, IntValue):
+                                new_epsilon = value.value
+                            EPSILON.value = new_epsilon
+                        else:
+                            raise_name_error(u"cannot change builtin attribute")
+                    # Libraries
+                    elif obj_type == u"module":
                         value = None
                         if obj.str_value == u"io":
                             if bt.attr not in (PRINT_IDX, OPEN_IDX):
@@ -723,13 +749,17 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         else:
                             raise_name_error(u"this")
                         env_store(env, bt.reg, value)
+                    # File
                     elif obj_type == u"file":
                         if bt.attr not in (READ_IDX, WRITE_IDX, CLOSE_IDX):
                             raise_name_error(u"this")
                         env_store(env, bt.reg, BoundFuncValue(global_scope[bt.attr+frame_size], obj))
                     else:
                         raise_unreachable_error(u"TODO . operator on SpecialValue with obj.type=" + obj.type)
+                # Function
                 elif isinstance(obj, FuncValue):
+                    if bt.storing:
+                        raise_name_error(u"cannot change builtin attribute")
                     if obj is global_scope[STR_IDX+frame_size]:
                         if bt.attr not in (LEN_IDX, JOIN_IDX):
                             raise_name_error(u"Unknown attribute")
@@ -738,9 +768,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                             raise_name_error(u"Unknown attribute")
                     else:
                         raise_name_error(u"cannot access attributes of " + inner_repr(obj))
-                    if bt.storing:
-                        raise_name_error(u"cannot change builtin attribute")
                     env_store(env, bt.reg, global_scope[bt.attr+frame_size])
+                # Object/Class
                 elif isinstance(obj, ObjectValue):
                     # Get cls (the object storing attr) and attr_idx (the idx into cls.attr_vals)
                     cls, attr_idx = attr_access(attr_matrix, lens, obj, bt.attr, bt.storing)
@@ -858,6 +887,8 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     else:
                         raise_type_error(u"exit value should be an int not " + get_type(value))
                     return exit_value
+                if ENV_IS_VIRTUALISABLE:
+                    hint(env, force_virtualizable=True)
                 if STACK_IS_LIST:
                     env, func, pc, ret_reg = stack.pop()
                 else:
@@ -910,19 +941,28 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         stack.append((env, func, pc, bt.regs[0]))
                     else:
                         stack = StackFrame(env, func, pc, bt.regs[0], stack)
+                    # Build the arguments
+                    tmp = [None]*func_info.max_nargs
+                    for i in range(len(_func.defaults)):
+                        tmp[i+func_info.min_nargs] = _func.defaults[i]
+                    for i in range(len(args)):
+                        tmp[i] = args[i]
+                    for i in range(len(bt.regs)-2):
+                        tmp[i+len(args)] = env_load(env, bt.regs[i+2])
+                    # Clear the regs in bt.clear
+                    for reg in bt.clear:
+                        if reg > 1:
+                            env_store(env, reg, None, chk=False)
                     # Set the pc/env/func
-                    func, old_pc, pc, old_env = _func, pc, func_info.tp, env
+                    func, old_pc, pc = _func, pc, func_info.tp
                     if ENV_IS_VIRTUALISABLE:
+                        hint(env, force_virtualizable=True)
                         env = VirtualisableArray(func_info.env_size+frame_size)
                     else:
                         env = [None]*(func_info.env_size+frame_size)
                     # Copy arguments values into new env
-                    for i in range(len(func.defaults)):
-                        env_store(env, i+2+func_info.min_nargs, func.defaults[i])
-                    for i in range(len(args)):
-                        env_store(env, i+2, args[i])
-                    for i in range(2, len(bt.regs)):
-                        env_store(env, i+len(args), env_load(old_env, bt.regs[i]))
+                    for i in range(len(tmp)):
+                        env_store(env, i+2, tmp[i])
                     enter_jit = enter_jit and ENTER_JIT_FUNC_CALL
                 else: # Built-ins
                     op_idx = func_info.tp - len(bytecode)
@@ -936,11 +976,10 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                     else:
                         value = builtin_side(op, args)
                     env_store(env, bt.regs[0], value)
-                    old_env = env
-                # Clear the regs in bt.clear
-                for reg in bt.clear:
-                    if reg > 1:
-                        env_store(old_env, reg, None, chk=False)
+                    # Clear the regs in bt.clear
+                    for reg in bt.clear:
+                        if reg > 1:
+                            env_store(env, reg, None, chk=False)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
                     jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, func_infos=func_infos,
                                             attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
@@ -1469,7 +1508,7 @@ def builtin_pure_unrollable(op, args, op_print):
                 if arg0.value == arg1.value:
                     return TRUE
             elif isinstance(arg1, FloatValue):
-                if arg1.value-epsilon < arg0.value < arg1.value+epsilon:
+                if arg1.value-EPSILON.value < arg0.value < arg1.value+EPSILON.value:
                     return TRUE
             return FALSE
         elif isinstance(arg0, BoolValue):
@@ -1480,7 +1519,7 @@ def builtin_pure_unrollable(op, args, op_print):
                 if arg0.value == arg1.value:
                     return TRUE
             elif isinstance(arg1, FloatValue):
-                if arg1.value-epsilon < arg0.value < arg1.value+epsilon:
+                if arg1.value-EPSILON.value < arg0.value < arg1.value+EPSILON.value:
                     return TRUE
             return FALSE
         elif isinstance(arg0, StrValue):
@@ -1490,13 +1529,13 @@ def builtin_pure_unrollable(op, args, op_print):
                 return TRUE
         elif isinstance(arg0, FloatValue):
             if isinstance(arg1, IntValue):
-                if arg0.value-epsilon < arg1.value < arg0.value+epsilon:
+                if arg0.value-EPSILON.value < arg1.value < arg0.value+EPSILON.value:
                     return TRUE
             elif isinstance(arg1, BoolValue):
-                if arg0.value-epsilon < arg1.value < arg0.value+epsilon:
+                if arg0.value-EPSILON.value < arg1.value < arg0.value+EPSILON.value:
                     return TRUE
             elif isinstance(arg1, FloatValue):
-                if arg0.value-epsilon < arg1.value < arg0.value+epsilon:
+                if arg0.value-EPSILON.value < arg1.value < arg0.value+EPSILON.value:
                     return TRUE
             return FALSE
         elif arg0 is arg1:
@@ -1781,7 +1820,10 @@ def builtin_pure_unrollable(op, args, op_print):
         elif isinstance(arg, BoolValue):
             return FloatValue(float(arg.value))
         elif isinstance(arg, FloatValue):
-            return arg
+            if arg is EPSILON:
+                return FloatValue(arg.value)
+            else:
+                return arg
         elif isinstance(arg, StrValue):
             return FloatValue(str_to_float(arg.value))
         raise_type_error(op_print + u" not supported on " + get_type(args[0]))
@@ -2198,4 +2240,5 @@ if __name__ == "__main__":
 # /media/thelizzard/TheLizzardOS-SD/rootfs/home/thelizzard/honours/lizzzard/src/frontend/rpython/jit/metainterp/optimizeopt
 # https://github.com/hanabi1224/Programming-Language-Benchmarks/tree/main
 # https://www.csl.cornell.edu/~cbatten/pdfs/cheng-type-freezing-slides-cgo2020.pdf
+# https://ntnuopen.ntnu.no/ntnu-xmlui/bitstream/handle/11250/253137/618488_FULLTEXT01.pdf
 # https://en.wikipedia.org/wiki/Comparison_of_functional_programming_languages

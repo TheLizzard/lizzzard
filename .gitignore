@@ -198,3 +198,6 @@ src/benchmarks/pypy
 # Benchmark temporary reports
 src/benchmarks/reports
 src/benchmarks/transform-jit.py
+
+# Dissertation
+dissertation

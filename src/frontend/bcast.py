@@ -696,6 +696,8 @@ def regs_to_str(array):
 def env_list_to_str(name, link):
     if link == 0:
         return u"nameidx[" + int_to_str(name) + u"]"
+    if link == -1:
+        return u"global_env[" + int_to_str(name) + u"]"
     return u"linked" + int_to_str(link) + u"[" + int_to_str(name) + u"]"
 
 def bytecode_list_to_str(bytecodes, mini=False):
