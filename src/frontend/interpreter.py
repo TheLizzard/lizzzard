@@ -894,7 +894,9 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                 else:
                     env, func, pc, ret_reg = stack.env, stack.func, stack.pc, stack.ret_reg
                     stack = stack.prev_stack
-                env_store(env, const(ret_reg), value)
+                ret_reg = const(ret_reg)
+                if ret_reg > 1:
+                    env_store(env, ret_reg, value)
                 if USE_JIT and enter_jit: # Tell the JIT about the jump
                     jitdriver.can_enter_jit(stack=stack, env=env, func=func, pc=pc, bytecode=bytecode, teleports=teleports, frame_size=frame_size, func_infos=func_infos,
                                             attr_matrix=attr_matrix, next_cls_type=next_cls_type, attrs=attrs, lens=lens, SOURCE_CODE=SOURCE_CODE, global_scope=global_scope)
@@ -975,7 +977,9 @@ def _interpret(bytecode, teleports, env, attrs, SOURCE_CODE, frame_size):
                         value = builtin_pure(op, args, op)
                     else:
                         value = builtin_side(op, args)
-                    env_store(env, bt.regs[0], value)
+                    res_reg = const(bt.regs[0])
+                    if res_reg > 1:
+                        env_store(env, res_reg, value)
                     # Clear the regs in bt.clear
                     for reg in bt.clear:
                         if reg > 1:

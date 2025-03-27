@@ -196,8 +196,8 @@ src/benchmarks/pypy
 !src/benchmarks/pypy/version.txt
 
 # Benchmark temporary reports
-src/benchmarks/reports
 src/benchmarks/transform-jit.py
+reports
 
 # Dissertation
 dissertation

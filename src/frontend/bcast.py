@@ -950,7 +950,7 @@ SPECIAL_ATTRS = [
                   u"read",      # FileObj.read(int) -> str
                   u"write",     # FileObj.write(str) -> none
                   u"join",      # <str>.join(list) -> str
-                  u"index",     # <list|str>.find(object|str) -> int
+                  u"index",     # <list|str>.index(object|str) -> int
                   u"split",     # <str>.split(str, int?) -> list[str]
                   u"replace",   # <str>.replace(str, str) -> str
                 ]
