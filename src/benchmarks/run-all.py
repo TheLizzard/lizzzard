@@ -12,9 +12,6 @@ LIZZ_EXECUTABLE:tuple[str] = ("../../../frontend/lizzzard",)
 pypy_base:str = path.join(path.dirname(__file__), "pypy")
 pypy_executable:str = path.join(pypy_base, "bin", "pypy3.11")
 
-pycket_executable:str = "./pycket-c"
-plthome:str = path.abspath(path.join(getcwd(), "../../../../pycket"))
-
 PYPY_ADD_ENV = {
                  "LD_LIBRARY_PATH": pypy_base,
                  "PYPYLOG": "jit-log-opt:" + PYPY_JIT_LOG_PATH
@@ -31,34 +28,47 @@ def set_unlimited_stack() -> None:
                                                resource.RLIM_INFINITY))
 
 
-TEST_REPEAT:int = 1
+TEST_REPEAT:int = 5
 BENCHMARKS = {
            "test":
                    [
-                     # ("sleep", (2,)), # test timing accuracy
+                     ("sleep", (2,)), # test timing accuracy
                    ],
            "benchmarksgame":
                    [
-                     # ("fasta", (2500000,)),
+                     ("fasta", (2500000,)),
                      ("fannkuch", (10,)),
-                     # ("binary-trees", (15,)),
-                     # ("n-body", (500000,)),
-                     # ("mandelbrot", (1000,)),
-                     # ("spectral-norm", (1000,)),
-                     # ("reverse-complement", Generate("data.fasta", 500000)),
+                     ("binary-trees", (15,)),
+                     ("n-body", (500000,)),
+                     ("mandelbrot", (1000,)),
+                     ("spectral-norm", (1000,)),
+                     ("reverse-complement", Generate("data.fasta", 500000)),
                    ],
            "simplebenchmarks":
                    [
-                     # ("fib1", (37,)),
-                     # ("fib2", (37,)),
-                     # ("while++", (100000000,)),
-                     # ("rec++", (1000000,)),
-                     # ("attr++", (100000000,)),
-                     # ("raytracer", ()),
-                     # ("prime-sieve", (2000,)),
-                     # ("nsieve", ("5000000",)),
+                     ("fib1", (37,)),
+                     ("fib2", (37,)),
+                     ("while++", (100000000,)),
+                     ("rec++", (1000000,)),
+                     ("attr++", (100000000,)),
+                     ("raytracer", ()),
+                     ("prime-sieve", (8000,)),
+                     ("nsieve", ("5000000",)),
                    ],
              }
+
+"""
+pycket:
+    binary-trees[15] => 0.269
+    n-body[500000] => 1.565
+    spectral-norm[1000] => 2.452
+    fannkuch[10] => 1.096
+    fib1[37] => 2.044
+    fib2[37] => 2.017
+    nsieve[5000000] => 1.881
+    prime-sieve[8000] => 2.73
+    rec++[1000000] => 1.685
+"""
 
 MAX_TIME_WAIT:float = 600 # wait 60 sec before canceling benchmark test
 def average(times:list[float]) -> float:
@@ -92,7 +102,6 @@ def main() -> None:
             run_lizz_benchmark(benchmark_name, benchmark, args)
             run_ocaml_benchmark(benchmark_name, benchmark, args)
             run_ocamlc_benchmark(benchmark_name, benchmark, args)
-            run_pycket_benchmark(benchmark_name, benchmark, args)
             run_c_benchmark(benchmark_name, benchmark, args)
 
 def generate_data_file(benchmark_name:str, test_name:str, gen:Generate) -> None:
@@ -162,6 +171,9 @@ def run_ocamlc_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     remove(filename(benchmark_name, test_name, "o"))
     remove(filename(benchmark_name, test_name, "cmi"))
     remove(filename(benchmark_name, test_name, "cmx"))
+    try:
+        remove(filename(benchmark_name, test_name, "json"))
+    except FileNotFoundError: pass
 
 def run_ocaml_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
     src_file:str = filename(benchmark_name, test_name, "ml")
@@ -170,18 +182,6 @@ def run_ocaml_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
         onsuccess=print_test_success(benchmark_name, test_name, "ocaml"),
         onfail=print_fail(benchmark_name, test_name, "ocaml", "RUN"),
         chk_expected=(benchmark_name,test_name), cwd=path.dirname(src_file))
-
-def run_pycket_benchmark(benchmark_name:str, test_name:str, args:tuple[str]):
-    cwd:str = getcwd()
-    src_file:str = filename(benchmark_name, test_name, "rkt")
-    if not path.exists(src_file): return
-    chdir(plthome)
-    run(pycket_executable, src_file, *args,
-        onsuccess=print_test_success(benchmark_name, test_name, "pycket"),
-        onfail=print_fail(benchmark_name, test_name, "pycket", "RUN"),
-        chk_expected=(benchmark_name,test_name), add_env={"PLTHOME":plthome},
-        cwd=plthome)
-    chdir(cwd)
 
 
 THIS:str = path.dirname(path.abspath(__file__))

@@ -1,0 +1,32 @@
+#lang racket
+
+(define (filter-generator generator prime)
+  (lambda ()
+    (let loop ()
+      (let ((i (generator)))
+        (if (= (modulo i prime) 0)
+            (loop)
+            i)))))
+
+(define (base-generator)
+  (let ((i 2))
+    (lambda ()
+      (let ((result i))
+        (set! i (+ i 1))
+        result))))
+
+(define (main n)
+  (when (<= n 0)
+    (error "ValueError"))
+  (let ((generator (base-generator)))
+    (let ((last-prime #f))
+      (let loop ((i 0))
+        (if (< i n)
+            (let ((prime (generator)))
+              (set! last-prime prime)
+              (set! generator (filter-generator generator prime))
+              (loop (+ i 1)))
+            (displayln last-prime))))))
+
+(define n (string->number (vector-ref (current-command-line-arguments) 0)))
+(main n)

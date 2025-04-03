@@ -190,6 +190,7 @@ log/run.run
 src/benchmarks/benchmarksgame/reverse-complement/data.fasta
 src/benchmarks/benchmarksgame/reverse-complement/gen.py
 src/benchmarks/*/*/*.clizz
+src/benchmarks/*/*/*.json
 
 # Pypy for bechmark
 src/benchmarks/pypy
